@@ -11,13 +11,21 @@ let refreshInterval = null;
 let showArchived = false;
 const REFRESH_MS = 3000;
 
-// Preserve token from URL for API calls
+// Detect base path when served behind a reverse-proxy sub-path (e.g. /m1/)
+// If the page loaded from /m1/index.html, API calls go to /m1/api/tasks
+const _base = (() => {
+  const p = window.location.pathname;
+  const m = p.match(/^(\/[^/]+\/)/);   // e.g. /m1/
+  return (m && m[1] !== '/') ? m[1].replace(/\/$/, '') : '';
+})();
+
 const urlToken = new URLSearchParams(window.location.search).get('token') || '';
 function apiUrl(path, extra = {}) {
   const params = new URLSearchParams(extra);
   if (urlToken) params.set('token', urlToken);
   const qs = params.toString();
-  return qs ? `${path}?${qs}` : path;
+  const full = _base + path;
+  return qs ? `${full}?${qs}` : full;
 }
 
 // ---------------------------------------------------------------------------

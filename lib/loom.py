@@ -30,6 +30,9 @@ class Config:
         "LOOM_DISTILL_MODEL": "claude-sonnet-4-5",
         "LOOM_DEFAULT_MODEL": "claude-opus-4-6",
         "LOOM_WORK_ROOT":    "",          # default working dir for new tasks (empty = cwd)
+        "LOOM_GATEWAY_HOST": "",          # gateway hostname (e.g. loom.yourdomain.com)
+        "LOOM_GATEWAY_USER": "loom-tunnel",
+        "LOOM_GATEWAY_PORT": "17799",     # unique reverse-tunnel port per machine
         "LOOM_NOTIFICATIONS": "notify-send",
         "LOOM_NTFY_TOPIC": "loom",
         "LOOM_NTFY_SERVER": "https://ntfy.sh",

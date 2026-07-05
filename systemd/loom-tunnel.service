@@ -1,0 +1,43 @@
+# loom reverse SSH tunnel — systemd user service
+# Keeps a persistent outbound tunnel to the gateway so it can proxy
+# your local loom web UI without opening any inbound ports.
+#
+# Install: cp loom-tunnel.service ~/.config/systemd/user/
+#          systemctl --user daemon-reload
+#          systemctl --user enable --now loom-tunnel
+#
+# Or run: loom tunnel enable   (handles everything)
+#
+# Required config in ~/.config/loom/config:
+#   LOOM_GATEWAY_HOST=loom.yourdomain.com
+#   LOOM_GATEWAY_USER=loom-tunnel
+#   LOOM_GATEWAY_PORT=17799   # unique per machine (17799, 17800, ...)
+
+[Unit]
+Description=loom reverse SSH tunnel to gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# autossh monitors the tunnel and reconnects if it drops.
+# -M 0: disable autossh's own monitoring port (use ServerAliveInterval instead)
+# -N: no remote command (tunnel only)
+# -R: reverse tunnel — gateway:GATEWAY_PORT → localhost:7799
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -o "ServerAliveInterval=30" \
+    -o "ServerAliveCountMax=3" \
+    -o "ExitOnForwardFailure=yes" \
+    -o "StrictHostKeyChecking=accept-new" \
+    -R "127.0.0.1:${LOOM_GATEWAY_PORT}:localhost:${LOOM_WEB_PORT:-7799}" \
+    ${LOOM_GATEWAY_USER}@${LOOM_GATEWAY_HOST}
+
+Restart=on-failure
+RestartSec=10s
+RestartSteps=5
+RestartMaxDelaySec=60s
+
+EnvironmentFile=-%h/.config/loom/config
+
+[Install]
+WantedBy=default.target

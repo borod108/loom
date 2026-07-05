@@ -1,0 +1,21 @@
+# loom web UI — systemd user service
+# Install: cp loom-web.service ~/.config/systemd/user/
+#          systemctl --user daemon-reload
+#          systemctl --user enable --now loom-web
+#
+# Or run: loom tunnel enable   (handles this automatically)
+
+[Unit]
+Description=loom web UI server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/loom/bin/loom web
+Restart=on-failure
+RestartSec=5s
+# Load user's loom config
+EnvironmentFile=-%h/.config/loom/config
+
+[Install]
+WantedBy=default.target

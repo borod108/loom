@@ -482,6 +482,86 @@ def cmd_web(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: T
         print("\nStopped.")
 
 
+def cmd_tunnel(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Manage the reverse SSH tunnel to the loom gateway."""
+    action = args.action
+
+    systemd_dir = Path.home() / ".config" / "systemd" / "user"
+    loom_dir    = find_loom_dir()
+    web_svc     = systemd_dir / "loom-web.service"
+    tun_svc     = systemd_dir / "loom-tunnel.service"
+
+    def systemctl(*cmd):
+        return subprocess.run(["systemctl", "--user", *cmd], capture_output=True)
+
+    if action == "status":
+        for svc in ("loom-web", "loom-tunnel"):
+            r = systemctl("is-active", svc)
+            active = r.stdout.decode().strip()
+            dot = green("●") if active == "active" else red("○")
+            print(f"  {dot} {svc}: {active}")
+        gw = cfg.get("LOOM_GATEWAY_HOST")
+        if gw:
+            port = cfg.get("LOOM_GATEWAY_PORT")
+            user = cfg.get("LOOM_GATEWAY_USER")
+            print(f"\n  Gateway : {user}@{gw}  (remote port {port})")
+        else:
+            print(f"\n  {dim('No gateway configured — set LOOM_GATEWAY_HOST in config')}")
+        return
+
+    if action == "enable":
+        gw = cfg.get("LOOM_GATEWAY_HOST")
+        if not gw:
+            _die("Set LOOM_GATEWAY_HOST in ~/.config/loom/config first.")
+
+        if not shutil.which("autossh"):
+            _die("autossh not installed. Run: sudo dnf install autossh  (or apt install autossh)")
+
+        systemd_dir.mkdir(parents=True, exist_ok=True)
+
+        # Install service files
+        for src, dst in [
+            (loom_dir / "systemd" / "loom-web.service",    web_svc),
+            (loom_dir / "systemd" / "loom-tunnel.service", tun_svc),
+        ]:
+            if not src.exists():
+                _die(f"Service file not found: {src}")
+            import shutil as _shutil
+            _shutil.copy(src, dst)
+            print(f"  Installed {dst.name}")
+
+        systemctl("daemon-reload")
+        for svc in ("loom-web", "loom-tunnel"):
+            systemctl("enable", "--now", svc)
+            r = systemctl("is-active", svc)
+            status = r.stdout.decode().strip()
+            if status == "active":
+                print(f"  {green('✓')} {svc} enabled and running")
+            else:
+                print(f"  {yellow('⚠')} {svc} enabled but status: {status}")
+                print(f"    Check: journalctl --user -u {svc} -n 20")
+
+        port = cfg.get("LOOM_GATEWAY_PORT")
+        user = cfg.get("LOOM_GATEWAY_USER")
+        print(f"\n  {green('✓')} Tunnel: {user}@{gw}  remote port {port} → localhost:7799")
+        print(f"  Gateway URL: https://{gw}/m1/  (or whichever path you configured)")
+
+    elif action == "disable":
+        for svc in ("loom-tunnel", "loom-web"):
+            systemctl("disable", "--now", svc)
+            print(f"  Disabled {svc}")
+
+    elif action == "restart":
+        for svc in ("loom-web", "loom-tunnel"):
+            systemctl("restart", svc)
+            r = systemctl("is-active", svc)
+            print(f"  {svc}: {r.stdout.decode().strip()}")
+
+    elif action == "logs":
+        svc = args.service or "loom-tunnel"
+        subprocess.run(["journalctl", "--user", "-u", svc, "-n", "50", "--no-pager"])
+
+
 def cmd_sync(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
     """Git-sync the vault (add, commit, pull --rebase, push)."""
     v = vault.vault
@@ -641,6 +721,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_snap = sub.add_parser("snapshot", help="Save current window layout (auto on session exit)")
     p_snap.add_argument("slug", help="Task name")
 
+    # tunnel
+    p_tun = sub.add_parser("tunnel", help="Manage reverse SSH tunnel to the gateway")
+    p_tun.add_argument("action", choices=["enable", "disable", "restart", "status", "logs"],
+                       help="enable=install+start services, disable=stop, logs=show journal")
+    p_tun.add_argument("--service", help="Which service for 'logs' (loom-web or loom-tunnel)")
+
     return p
 
 
@@ -660,6 +746,7 @@ _COMMANDS = {
     "popup":   cmd_popup,
     "link":     cmd_link,
     "snapshot": cmd_snapshot,
+    "tunnel":   cmd_tunnel,
 }
 
 

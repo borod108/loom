@@ -22,8 +22,17 @@ LOOM_DEFAULT_MODEL="claude-opus-4-6"
 # ── Web UI ─────────────────────────────────────────────────────────────────
 LOOM_WEB_PORT="7799"
 
-# Bind address. Use 0.0.0.0 to expose to LAN/remote. Use 127.0.0.1 for localhost-only.
-LOOM_WEB_BIND="0.0.0.0"
+# When using the gateway, bind to localhost only (the tunnel connects it externally).
+# Without a gateway, use 0.0.0.0 for direct LAN access.
+LOOM_WEB_BIND="127.0.0.1"
+
+# ── Gateway (central AWS reverse-proxy) ────────────────────────────────────
+# See gateway/setup-gateway.sh to set up the AWS instance.
+# Run `loom tunnel enable` after setting these to install systemd services.
+#
+# LOOM_GATEWAY_HOST="loom.yourdomain.com"
+# LOOM_GATEWAY_USER="loom-tunnel"
+# LOOM_GATEWAY_PORT="17799"   # unique per machine: 17799, 17800, 17801, …
 
 # Optional Bearer token for web UI auth. Empty = no auth (only do this on localhost).
 # Access via: http://host:7799/?token=your-secret
