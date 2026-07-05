@@ -29,9 +29,28 @@ try:
         # Known task — update with fresh transcript path and status
         vault.update_task(slug, status="waiting", transcript_path=transcript)
         state.upsert(slug, status="waiting", transcript_path=transcript, cwd=cwd)
+
+        # Inject vault awareness so Claude proactively writes knowledge as it works
+        task_note = str(vault.task_path(slug))
+        vault_root = str(cfg.vault)
+        context = f"""\
+You are working in a loom-tracked session. Your knowledge vault is at {vault_root}/.
+
+TASK NOTE (your session record): {task_note}
+SESSION SLUG: {slug}
+
+As you work, write knowledge to the vault so it persists across sessions:
+- Research findings → {vault_root}/40-Research/<topic>.md
+- Architecture decisions → {vault_root}/30-Decisions/ADR-NNN-<slug>.md  (run: loom adr "<title>")
+- Append discoveries to your task log: {task_note}  (under ## Log)
+- Link a document you create: loom link {slug} <path>
+
+The /recall skill searches the vault for prior work on any topic. Use it at the start of new investigations."""
+
+        # Return additionalContext so Claude sees vault instructions each session
+        import json as _json
+        print(_json.dumps({"additionalContext": context}))
     # Unknown session (started outside loom) — do NOT auto-register.
-    # Auto-registration creates unmanaged clutter in the vault and web UI.
-    # Users who want to track an external session should run: loom new <slug>
 
 except Exception as e:
     print(f"loom session-start hook error: {e}", file=sys.stderr)
