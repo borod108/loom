@@ -29,6 +29,7 @@ class Config:
         "LOOM_DISTILL": "auto",
         "LOOM_DISTILL_MODEL": "claude-sonnet-4-5",
         "LOOM_DEFAULT_MODEL": "claude-opus-4-6",
+        "LOOM_WORK_ROOT":    "",          # default working dir for new tasks (empty = cwd)
         "LOOM_NOTIFICATIONS": "notify-send",
         "LOOM_NTFY_TOPIC": "loom",
         "LOOM_NTFY_SERVER": "https://ntfy.sh",
@@ -87,6 +88,11 @@ class Config:
     @property
     def default_model(self) -> str:
         return self.get("LOOM_DEFAULT_MODEL")
+
+    @property
+    def work_root(self) -> str:
+        v = self.get("LOOM_WORK_ROOT", "")
+        return os.path.expanduser(v) if v else ""
 
     @property
     def notifications(self) -> List[str]:
@@ -730,29 +736,46 @@ class TmuxManager:
         Falls back to a tmux window for non-systemd systems.
         """
         name = self.session_name(slug)
-        target = f"{name}:0.0"
+        # Target the named 'claude' window; watcher will try both
+        targets = [f"{name}:claude.0", f"{name}:0.0"]
 
         # Write watcher to a temp file — avoids quoting hell in -c strings
         import tempfile
         script_path = tempfile.mktemp(suffix="_loom_goal.py")
         script = f"""import subprocess, time, os
-target = {repr(target)}
-text   = {repr(text)}
-script = {repr(script_path)}
+
+targets = {repr(targets)}
+text    = {repr(text)}
+script  = {repr(script_path)}
 
 def pane():
-    r = subprocess.run(
-        ['tmux', 'capture-pane', '-p', '-t', target],
-        capture_output=True, text=True,
-    )
-    return r.stdout if r.returncode == 0 else ''
+    for t in targets:
+        r = subprocess.run(
+            ['tmux', 'capture-pane', '-p', '-t', t],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return t, r.stdout
+    return targets[0], ''
 
-# Poll until Claude's prompt glyph appears
+def claude_ready(p):
+    # The 🤖 robot emoji appears in Claude's status bar ONLY after it is fully
+    # initialised and any trust dialog has been resolved.  Checking for the
+    # input-prompt glyph (❯) alone is not sufficient because it also appears
+    # inside the trust-workspace dialog that Claude shows in new directories.
+    robot = chr(0x1F916)   # 🤖
+    if robot in p:
+        return True
+    # Fallback: status-bar model name + separator line (works on emoji-less terms)
+    has_model = any(m in p for m in ('Sonnet', 'Opus', 'Haiku', 'Fable', 'Claude Code'))
+    has_bar   = ('\\u2500' * 10) in p  # ─────────── separator
+    return has_model and has_bar
+
 for _ in range({timeout * 2}):
     time.sleep(0.5)
-    p = pane()
-    if '\\u276f' in p or 'Human:' in p:
-        time.sleep(0.5)
+    target, p = pane()
+    if claude_ready(p):
+        time.sleep(0.5)  # small extra settle
         subprocess.run(['tmux', 'send-keys', '-t', target, text, 'Enter'])
         break
 

@@ -100,6 +100,71 @@ def _confirm(prompt: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Work-dir picker
+# ---------------------------------------------------------------------------
+
+def pick_work_dir(cfg: Config, vault: VaultManager) -> str:
+    """Interactive directory picker using recent task roots + configured default."""
+    # Build candidate list: configured root first, then recent unique cwds from vault
+    home = str(Path.home())
+    default = cfg.work_root or os.getcwd()
+
+    # Collect up to 6 unique recent cwds from active tasks (most-recently-updated first)
+    tasks = []
+    if vault.is_initialized():
+        tasks = sorted(
+            vault.list_tasks(include_archived=False),
+            key=lambda t: t.get("updated", t.get("started", "")),
+            reverse=True,
+        )
+    seen: dict = {}
+    for t in tasks:
+        cwd = t.get("cwd", "")
+        if cwd and cwd not in seen:
+            seen[cwd] = True
+
+    # Deduplicated options: default first, then recents, no duplicates
+    options = [default]
+    for cwd in seen:
+        if cwd not in options:
+            options.append(cwd)
+    options = options[:7]  # cap at 7
+
+    if not sys.stdin.isatty():
+        return options[0]
+
+    print(f"\n{bold('Select working directory:')}")
+    for i, path in enumerate(options, 1):
+        display = path.replace(home, "~")
+        label = ""
+        if i == 1 and cfg.work_root:
+            label = dim("  ← default (LOOM_WORK_ROOT)")
+        elif i == 1:
+            label = dim("  ← current dir")
+        elif i <= 2:
+            label = dim("  recent")
+        print(f"  {i}. {display}{label}")
+    print(f"  Or type a path. Enter = {options[0].replace(home, '~')}: ", end="", flush=True)
+
+    try:
+        raw = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return options[0]
+
+    if not raw:
+        return options[0]
+    try:
+        idx = int(raw) - 1
+        if 0 <= idx < len(options):
+            return options[idx]
+    except ValueError:
+        pass
+    # Treat as a path
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -122,7 +187,12 @@ def cmd_new(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: T
     if not slug:
         _die("Invalid task name.")
 
-    cwd = os.path.abspath(args.dir or os.getcwd())
+    # Working directory
+    if args.dir:
+        cwd = os.path.abspath(args.dir)
+    else:
+        cwd = pick_work_dir(cfg, vault)
+
     goal = args.goal or ""
     session_id = str(uuid.uuid4())
     session_name = tmux.session_name(slug)

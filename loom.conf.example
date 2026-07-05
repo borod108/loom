@@ -10,6 +10,15 @@ LOOM_VAULT="~/vault"
 # Prefix for tmux session names. Sessions are named <prefix>-<task-slug>.
 LOOM_SESSION_PREFIX="loom"
 
+# ── Work root ───────────────────────────────────────────────────────────────
+# Default working directory for new tasks. Shown as the first option in the
+# directory picker when running `loom new` without --dir.
+# Empty = use current directory as first option.
+LOOM_WORK_ROOT="~/work/forklift"
+
+# ── Default model ───────────────────────────────────────────────────────────
+LOOM_DEFAULT_MODEL="claude-opus-4-6"
+
 # ── Web UI ─────────────────────────────────────────────────────────────────
 LOOM_WEB_PORT="7799"
 
