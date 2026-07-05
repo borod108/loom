@@ -28,6 +28,7 @@ class Config:
         "LOOM_WEB_TOKEN": "",
         "LOOM_DISTILL": "auto",
         "LOOM_DISTILL_MODEL": "claude-sonnet-4-5",
+        "LOOM_DEFAULT_MODEL": "claude-opus-4-6",
         "LOOM_NOTIFICATIONS": "notify-send",
         "LOOM_NTFY_TOPIC": "loom",
         "LOOM_NTFY_SERVER": "https://ntfy.sh",
@@ -82,6 +83,10 @@ class Config:
     @property
     def distill_model(self) -> str:
         return self.get("LOOM_DISTILL_MODEL")
+
+    @property
+    def default_model(self) -> str:
+        return self.get("LOOM_DEFAULT_MODEL")
 
     @property
     def notifications(self) -> List[str]:
@@ -162,6 +167,7 @@ tmux_session: {tmux_session}
 status: starting
 cwd: {cwd}
 project: {project}
+model: {model}
 started: {now}
 updated: {now}
 ---
@@ -175,6 +181,9 @@ updated: {now}
 ## Log
 
 - {now} Task created
+
+## Linked Documents
+
 """
 
 _COMPACT_NOTE = "\n- {now} Compaction checkpoint · transcript: `{transcript_path}`\n"
@@ -263,7 +272,7 @@ class VaultManager:
     # --- CRUD ---
 
     def create_task(
-        self, slug: str, session_id: str, cwd: str, goal: str = ""
+        self, slug: str, session_id: str, cwd: str, goal: str = "", model: str = ""
     ) -> Path:
         self.ensure_structure()
         path = self.task_path(slug)
@@ -274,6 +283,7 @@ class VaultManager:
             tmux_session=f"{self.config.session_prefix}-{slug}",
             cwd=cwd,
             project=Path(cwd).name,
+            model=model or self.config.default_model,
             now=_now_iso(),
             slug=slug,
             goal=goal if goal else "_not set_",
@@ -320,14 +330,22 @@ class VaultManager:
         path.write_text(content + note)
         return True
 
-    def list_tasks(self) -> List[Dict[str, Any]]:
-        tasks_dir = self.vault / "10-Tasks"
-        if not tasks_dir.exists():
-            return []
+    def list_tasks(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         results = []
-        for p in sorted(tasks_dir.glob("*.md")):
-            fields, _ = _parse_frontmatter(p.read_text())
-            results.append({**fields, "slug": p.stem})
+        dirs = [self.vault / "10-Tasks"]
+        if include_archived:
+            dirs.append(self.vault / "90-Archive")
+        for tasks_dir in dirs:
+            if not tasks_dir.exists():
+                continue
+            is_archive = tasks_dir.name == "90-Archive"
+            for p in sorted(tasks_dir.glob("*.md")):
+                fields, _ = _parse_frontmatter(p.read_text())
+                entry = {**fields, "slug": p.stem}
+                if is_archive and entry.get("status") not in ("done",):
+                    entry["status"] = "done"
+                entry["_archived"] = is_archive
+                results.append(entry)
         return results
 
     def archive_task(self, slug: str) -> bool:
@@ -337,6 +355,23 @@ class VaultManager:
         self.ensure_structure()
         shutil.move(str(src), str(self.archive_path(slug)))
         self.rebuild_dashboard()
+        return True
+
+    def link_doc(self, slug: str, doc_path: str) -> bool:
+        """Append a document link to the task note's Linked Documents section."""
+        path = self.task_path(slug)
+        if not path.exists():
+            # Try archive
+            path = self.archive_path(slug)
+            if not path.exists():
+                return False
+        content = path.read_text()
+        link_line = f"- [[{doc_path}]]\n"
+        if "## Linked Documents" in content:
+            content = content.rstrip() + "\n" + link_line
+        else:
+            content = content.rstrip() + "\n\n## Linked Documents\n\n" + link_line
+        path.write_text(content)
         return True
 
     def find_by_session_id(self, session_id: str) -> Optional[str]:
@@ -523,24 +558,23 @@ class TmuxManager:
             })
         return sessions
 
-    def new_session(self, slug: str, cwd: str, session_id: str) -> bool:
+    def new_session(self, slug: str, cwd: str, session_id: str, model: str = "") -> bool:
         name = self.session_name(slug)
         cwd = os.path.expanduser(cwd)
-        # Create detached session with a plain shell first
         r = subprocess.run(
             ["tmux", "new-session", "-d", "-s", name, "-c", cwd],
             capture_output=True,
         )
         if r.returncode != 0:
             return False
-        # Start claude in window 0
-        subprocess.run(
-            ["tmux", "send-keys", "-t", f"{name}:0.0",
-             f"claude --session-id {session_id}", "Enter"],
-        )
+        cmd = "claude"
+        if model:
+            cmd += f" --model {model}"
+        cmd += f" --session-id {session_id}"
+        subprocess.run(["tmux", "send-keys", "-t", f"{name}:0.0", cmd, "Enter"])
         return True
 
-    def resume_in_session(self, slug: str, cwd: str, session_id: str) -> bool:
+    def resume_in_session(self, slug: str, cwd: str, session_id: str, model: str = "") -> bool:
         name = self.session_name(slug)
         cwd = os.path.expanduser(cwd)
         r = subprocess.run(
@@ -549,10 +583,11 @@ class TmuxManager:
         )
         if r.returncode != 0:
             return False
-        subprocess.run(
-            ["tmux", "send-keys", "-t", f"{name}:0.0",
-             f"claude --resume {session_id}", "Enter"],
-        )
+        cmd = "claude"
+        if model:
+            cmd += f" --model {model}"
+        cmd += f" --resume {session_id}"
+        subprocess.run(["tmux", "send-keys", "-t", f"{name}:0.0", cmd, "Enter"])
         return True
 
     def attach(self, slug: str):

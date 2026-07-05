@@ -95,24 +95,37 @@ def _read_body(handler: "LoomHandler") -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_task_summary(slug: str, fields: dict) -> dict:
-    status = fields.get("status", "unknown")
-    alive  = _tmux.session_exists(slug)
+    alive    = _tmux.session_exists(slug)
+    status   = fields.get("status", "unknown")
+    archived = fields.get("_archived", False)
+    # Compute display status
+    if status in ("idle", "starting") and not alive and not archived:
+        display_status = "dead"
+    elif archived:
+        display_status = "done"
+    else:
+        display_status = status
     return {
-        "slug":    slug,
-        "status":  status,
-        "project": fields.get("project", ""),
-        "cwd":     fields.get("cwd", ""),
-        "started": fields.get("started", ""),
-        "updated": fields.get("updated", ""),
-        "age":     format_age(fields.get("updated") or fields.get("started", "")),
-        "session": _tmux.session_name(slug),
-        "alive":   alive,
-        "session_id": fields.get("session_id", ""),
+        "slug":           slug,
+        "status":         display_status,
+        "raw_status":     status,
+        "archived":       archived,
+        "project":        fields.get("project", ""),
+        "cwd":            fields.get("cwd", ""),
+        "model":          fields.get("model", ""),
+        "started":        fields.get("started", ""),
+        "updated":        fields.get("updated", ""),
+        "age":            format_age(fields.get("updated") or fields.get("started", "")),
+        "session":        _tmux.session_name(slug),
+        "alive":          alive,
+        "session_id":     fields.get("session_id", ""),
     }
 
 
 def api_tasks_list(handler: "LoomHandler"):
-    tasks = _vault.list_tasks()
+    qs = parse_qs(urlparse(handler.path).query)
+    include_all = qs.get("all", [""])[0] in ("1", "true")
+    tasks = _vault.list_tasks(include_archived=include_all)
     result = []
     for t in tasks:
         slug = t.pop("slug", None)

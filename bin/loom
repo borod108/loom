@@ -43,11 +43,48 @@ STATUS_DOT = {
     "idle":             gray("○"),
     "starting":         cyan("◎"),
     "done":             dim("✓"),
+    "dead":             red("✗"),
     "error":            red("✗"),
 }
 
 def _dot(status: str) -> str:
     return STATUS_DOT.get(status, gray("?"))
+
+# ---------------------------------------------------------------------------
+# Model picker
+# ---------------------------------------------------------------------------
+
+KNOWN_MODELS = [
+    ("claude-opus-4-6",    "Opus 4.6  · 1M ctx"),
+    ("claude-opus-4-8",    "Opus 4.8  · 1M ctx · latest"),
+    ("claude-sonnet-5",    "Sonnet 5  · 1M ctx"),
+    ("claude-sonnet-4-6",  "Sonnet 4.6· 1M ctx"),
+    ("claude-haiku-4-5",   "Haiku 4.5 · 200K ctx · fastest"),
+]
+
+def pick_model(default: str) -> str:
+    """Interactive model picker; falls back to default when non-interactive."""
+    if not sys.stdin.isatty():
+        return default
+    print(f"\n{bold('Select model:')}")
+    for i, (mid, desc) in enumerate(KNOWN_MODELS, 1):
+        marker = dim(" ← default") if mid == default else ""
+        print(f"  {i}. {mid:<28} {dim(desc)}{marker}")
+    while True:
+        try:
+            raw = input(f"\n  Enter number [default: {default}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+        if not raw:
+            return default
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(KNOWN_MODELS):
+                return KNOWN_MODELS[idx][0]
+        except ValueError:
+            pass
+        print(f"  Please enter 1–{len(KNOWN_MODELS)}")
 
 
 def _die(msg: str, code: int = 1):
@@ -90,19 +127,24 @@ def cmd_new(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: T
     session_id = str(uuid.uuid4())
     session_name = tmux.session_name(slug)
 
+    # Model selection
+    if args.model:
+        model = args.model
+    else:
+        model = pick_model(cfg.default_model)
+
     if tmux.session_exists(slug):
         _die(f"Session {session_name} already exists. Use: loom go {slug}")
 
     try:
-        vault.create_task(slug, session_id, cwd, goal)
+        vault.create_task(slug, session_id, cwd, goal, model=model)
     except FileExistsError:
         _die(f"Task '{slug}' already exists in the vault.")
 
     state.upsert(slug, session_id=session_id, status="starting", cwd=cwd,
-                 tmux_session=session_name, project=Path(cwd).name)
+                 tmux_session=session_name, project=Path(cwd).name, model=model)
 
-    if not tmux.new_session(slug, cwd, session_id):
-        # Clean up vault note if session creation failed
+    if not tmux.new_session(slug, cwd, session_id, model=model):
         vault.task_path(slug).unlink(missing_ok=True)
         state.remove(slug)
         _die("Failed to create tmux session. Is tmux installed and running?")
@@ -112,12 +154,14 @@ def cmd_new(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: T
         tmux.send_after_ready(slug, goal)
         print(f"{green('✓')} Created task {bold(slug)}")
         print(f"  Session : {session_name}")
+        print(f"  Model   : {model}")
         print(f"  CWD     : {cwd}")
         print(f"  Goal    : {dim(goal[:80] + ('…' if len(goal) > 80 else ''))}")
         print(f"\n  Goal will be sent once Claude starts. Attach: {bold(f'loom go {slug}')}")
     else:
         print(f"{green('✓')} Created task {bold(slug)}")
         print(f"  Session : {session_name}")
+        print(f"  Model   : {model}")
         print(f"  CWD     : {cwd}")
         print(f"\n  Attach  : {bold(f'loom go {slug}')}")
 
@@ -128,13 +172,21 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
         print("No vault initialized. Run: loom init")
         return
 
-    tasks = vault.list_tasks()
+    show_all = getattr(args, "all", False)
+    plain    = getattr(args, "plain", False)
+    tasks    = vault.list_tasks(include_archived=show_all)
+
+    # By default hide done/archived tasks (they have _archived=True)
+    if not show_all:
+        tasks = [t for t in tasks if not t.get("_archived") and t.get("status") not in ("done",)]
+
     if not tasks:
-        print(dim("No active tasks.") if not getattr(args, "plain", False) else "")
+        if not plain:
+            msg = "No active tasks." if not show_all else "No tasks."
+            print(dim(msg))
         return
 
     live_sessions = {s["slug"] for s in tmux.list_sessions()}
-    plain = getattr(args, "plain", False)
 
     col_task   = max((len(t.get("slug", "")) for t in tasks), default=4)
     col_task   = max(col_task, 4)
@@ -150,32 +202,48 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
         print(dim("  " + "─" * (len(header) - 2)))
 
     for t in tasks:
-        slug    = t.get("slug", "")
-        status  = t.get("status", "idle")
-        project = t.get("project", "")
-        cwd     = t.get("cwd", "")
-        updated = t.get("updated", t.get("started", ""))
-        age     = format_age(updated)
-        alive   = "  " if slug in live_sessions else dim(" ∅")
+        slug     = t.get("slug", "")
+        status   = t.get("status", "idle")
+        project  = t.get("project", "")
+        cwd      = t.get("cwd", "")
+        updated  = t.get("updated", t.get("started", ""))
+        age      = format_age(updated)
+        is_alive = slug in live_sessions
+        archived = t.get("_archived", False)
+
+        # Compute display status: idle + no session = dead
+        if status in ("idle", "starting") and not is_alive and not archived:
+            display_status = "dead"
+        elif archived:
+            display_status = "done"
+        else:
+            display_status = status
 
         home = str(Path.home())
         cwd_display = cwd.replace(home, "~")
         if len(cwd_display) > 40:
             cwd_display = "…" + cwd_display[-39:]
 
-        dot = _dot(status)
-        status_display = f"{status:<{col_status - 2}}"
+        dot = _dot(display_status)
 
         if plain:
-            # Clean output for fzf — no ANSI, slug first so awk can grab it
-            alive_plain = "●" if slug in live_sessions else "○"
-            print(f"{slug:<{col_task}}  {status:<{col_status - 2}}  {project:<{col_proj}}  {age:>5}  {cwd_display}")
+            print(f"{slug:<{col_task}}  {display_status:<{col_status - 2}}  {project:<{col_proj}}  {age:>5}  {cwd_display}")
         else:
-            print(f"{alive} {dot} {slug:<{col_task}}  {status_display}  {project:<{col_proj}}  {age:>5}  {dim(cwd_display)}")
+            alive_marker = "  " if is_alive else dim(" ∅")
+            status_col   = f"{display_status:<{col_status - 2}}"
+            row = f"{alive_marker} {dot} {slug:<{col_task}}  {status_col}  {project:<{col_proj}}  {age:>5}  {dim(cwd_display)}"
+            # Dim the whole row for done/archived tasks
+            print(dim(row) if archived else row)
 
     if not plain:
+        active = sum(1 for t in tasks if not t.get("_archived"))
+        done   = sum(1 for t in tasks if t.get("_archived"))
+        parts  = [f"  {active} active"]
+        if done:
+            parts.append(f"{done} done")
+        parts.append("∅ = no live session")
         print()
-        print(dim(f"  {len(tasks)} task(s)  ·  ∅ = no live session"))
+        print(dim("  ·  ".join(parts)))
 
 
 def cmd_popup(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
@@ -223,8 +291,13 @@ def cmd_resume(args, cfg: Config, vault: VaultManager, state: StateManager, tmux
         if claude_running:
             print(f"{green('✓')} Claude is running — attaching to {bold(tmux.session_name(slug))}")
         else:
+            model = getattr(args, "model", None) or task.get("model", "")
+            resume_cmd = "claude"
+            if model:
+                resume_cmd += f" --model {model}"
+            resume_cmd += f" --resume {session_id}"
             print(f"  Session exists but Claude is not running — sending resume command…")
-            tmux.send_keys(slug, f"claude --resume {session_id}")
+            tmux.send_keys(slug, resume_cmd)
             vault.update_task(slug, status="starting")
             state.upsert(slug, status="starting")
         if not args.no_attach:
@@ -271,9 +344,25 @@ def cmd_done(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: 
 
     vault.update_task(slug, status="done")
     vault.archive_task(slug)
-    state.remove(slug)
+    # Keep in state as done (visible with loom ls --all) instead of removing
+    state.upsert(slug, status="done")
 
-    print(f"{green('✓')} Task {bold(slug)} archived to vault/90-Archive/")
+    print(f"{green('✓')} Task {bold(slug)} archived  (visible with: loom ls --all)")
+
+
+def cmd_link(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Link a document to a task note."""
+    slug = args.slug
+    doc  = args.doc
+
+    # Normalise: if path is absolute and inside vault, make it relative
+    vault_str = str(vault.vault)
+    if doc.startswith(vault_str):
+        doc = doc[len(vault_str):].lstrip("/")
+
+    if not vault.link_doc(slug, doc):
+        _die(f"Task '{slug}' not found.")
+    print(f"{green('✓')} Linked {dim(doc)} → {bold(slug)}")
 
 
 def cmd_web(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
@@ -395,10 +484,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("slug", help="Task name (will be slugified)")
     p_new.add_argument("--dir", "-d", help="Working directory (default: cwd)")
     p_new.add_argument("--goal", "-g", help="One-line goal description")
+    p_new.add_argument("--model", "-m", help="Claude model (skips interactive picker)")
 
     # ls
     p_ls = sub.add_parser("ls", help="List active tasks")
     p_ls.add_argument("--plain", action="store_true", help="Plain output for scripting/fzf")
+    p_ls.add_argument("--all", "-a", action="store_true", help="Include done/archived tasks")
 
     # go
     p_go = sub.add_parser("go", help="Attach to a task session")
@@ -408,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume = sub.add_parser("resume", help="Resume a task session")
     p_resume.add_argument("slug", help="Task name")
     p_resume.add_argument("--no-attach", action="store_true", help="Don't attach after creating session")
+    p_resume.add_argument("--model", "-m", help="Override model for this resume")
 
     # done
     p_done = sub.add_parser("done", help="Mark a task as done and archive it")
@@ -444,6 +536,11 @@ def build_parser() -> argparse.ArgumentParser:
     # popup
     sub.add_parser("popup", help="fzf session picker in a tmux popup (bind to a key!)")
 
+    # link
+    p_link = sub.add_parser("link", help="Link a document to a task note")
+    p_link.add_argument("slug", help="Task name")
+    p_link.add_argument("doc", help="Path to document (absolute or vault-relative)")
+
     return p
 
 
@@ -461,6 +558,7 @@ _COMMANDS = {
     "preview": cmd_preview,
     "send":    cmd_send,
     "popup":   cmd_popup,
+    "link":    cmd_link,
 }
 
 

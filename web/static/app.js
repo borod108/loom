@@ -8,12 +8,16 @@ let tasks = [];
 let expandedSlugs = new Set();
 let modalSlug = null;
 let refreshInterval = null;
+let showArchived = false;
 const REFRESH_MS = 3000;
 
 // Preserve token from URL for API calls
 const urlToken = new URLSearchParams(window.location.search).get('token') || '';
-function apiUrl(path) {
-  return urlToken ? `${path}?token=${encodeURIComponent(urlToken)}` : path;
+function apiUrl(path, extra = {}) {
+  const params = new URLSearchParams(extra);
+  if (urlToken) params.set('token', urlToken);
+  const qs = params.toString();
+  return qs ? `${path}?${qs}` : path;
 }
 
 // ---------------------------------------------------------------------------
@@ -21,7 +25,8 @@ function apiUrl(path) {
 // ---------------------------------------------------------------------------
 
 async function fetchTasks() {
-  const r = await fetch(apiUrl('/api/tasks'));
+  const url = apiUrl('/api/tasks', showArchived ? {all: '1'} : {});
+  const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -51,31 +56,47 @@ async function killSession(slug) {
 // ---------------------------------------------------------------------------
 
 function statusDotClass(status) {
-  return ['working', 'waiting', 'idle', 'starting', 'done', 'error'].includes(status)
+  return ['working', 'waiting', 'idle', 'starting', 'done', 'dead', 'error'].includes(status)
     ? status : 'idle';
 }
 
 function renderTask(task) {
-  const expanded = expandedSlugs.has(task.slug);
-  const dead = !task.alive;
+  const expanded  = expandedSlugs.has(task.slug);
+  const dead      = !task.alive && !task.archived;
+  const archived  = task.archived;
+  const statusCls = statusDotClass(task.status);
 
   const card = document.createElement('div');
-  card.className = `task-card${expanded ? ' expanded' : ''}${dead ? ' dead' : ''}`;
+  card.className = [
+    'task-card',
+    expanded ? 'expanded' : '',
+    dead     ? 'dead'     : '',
+    archived ? 'archived' : '',
+  ].filter(Boolean).join(' ');
   card.dataset.slug = task.slug;
 
   // Actions always visible in header — no expansion required
-  const headerActions = task.alive
-    ? `<button class="btn btn-sm btn-secondary" data-action="send" data-slug="${esc(task.slug)}" title="Send input">✏</button>
-       <button class="btn btn-sm btn-danger"    data-action="kill" data-slug="${esc(task.slug)}" title="Kill session">✕</button>`
-    : `<button class="btn btn-sm btn-ghost"     data-action="resume" data-slug="${esc(task.slug)}" title="Resume Claude">▶ Resume</button>`;
+  let headerActions = '';
+  if (task.alive) {
+    headerActions = `
+      <button class="btn btn-sm btn-secondary" data-action="send" data-slug="${esc(task.slug)}" title="Send input">✏</button>
+      <button class="btn btn-sm btn-danger"    data-action="kill" data-slug="${esc(task.slug)}" title="Kill session">✕</button>`;
+  } else if (!archived) {
+    headerActions = `<button class="btn btn-sm btn-ghost" data-action="resume" data-slug="${esc(task.slug)}" title="Resume Claude">▶ Resume</button>`;
+  }
+
+  const modelTag = task.model
+    ? `<span class="task-model" title="Model">${esc(task.model.replace('claude-',''))}</span>`
+    : '';
 
   card.innerHTML = `
     <div class="task-header">
-      <span class="status-dot ${statusDotClass(task.status)}"></span>
+      <span class="status-dot ${statusCls}"></span>
       <span class="task-slug">${esc(task.slug)}</span>
       <div class="task-meta">
-        <span class="status-badge ${statusDotClass(task.status)}">${esc(task.status)}</span>
+        <span class="status-badge ${statusCls}">${esc(task.status)}</span>
         ${task.project ? `<span class="task-project">${esc(task.project)}</span>` : ''}
+        ${modelTag}
         <span class="task-age">${esc(task.age)}</span>
         <div class="header-actions" onclick="event.stopPropagation()">
           ${headerActions}
@@ -286,6 +307,15 @@ function esc(s) {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Show archived toggle
+  const btnAll = document.getElementById('btn-show-all');
+  btnAll.addEventListener('click', () => {
+    showArchived = !showArchived;
+    btnAll.textContent = showArchived ? 'Hide archived' : 'Show archived';
+    btnAll.classList.toggle('active', showArchived);
+    refresh();
+  });
+
   // Refresh button
   document.getElementById('btn-refresh').addEventListener('click', () => {
     refresh();
