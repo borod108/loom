@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""loom — tmux-based Claude Code workbench."""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+# Resolve lib path relative to this script
+_BIN = Path(__file__).resolve().parent
+_LIB = _BIN.parent / "lib"
+sys.path.insert(0, str(_LIB))
+
+from loom import (
+    Config, VaultManager, StateManager, TmuxManager, NotifyManager,
+    format_age, slugify, load_managers, find_loom_dir,
+)
+
+# ---------------------------------------------------------------------------
+# Terminal colours (only when stdout is a TTY)
+# ---------------------------------------------------------------------------
+
+_IS_TTY = sys.stdout.isatty()
+
+def _c(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _IS_TTY else text
+
+def green(t):  return _c("92", t)
+def yellow(t): return _c("93", t)
+def gray(t):   return _c("90", t)
+def red(t):    return _c("91", t)
+def bold(t):   return _c("1",  t)
+def dim(t):    return _c("2",  t)
+def cyan(t):   return _c("96", t)
+
+STATUS_DOT = {
+    "working":          green("●"),
+    "waiting":          yellow("◌"),
+    "idle":             gray("○"),
+    "starting":         cyan("◎"),
+    "done":             dim("✓"),
+    "error":            red("✗"),
+}
+
+def _dot(status: str) -> str:
+    return STATUS_DOT.get(status, gray("?"))
+
+
+def _die(msg: str, code: int = 1):
+    print(red(f"error: {msg}"), file=sys.stderr)
+    sys.exit(code)
+
+
+def _confirm(prompt: str) -> bool:
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() == "y"
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_init(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Initialize the vault."""
+    if vault.is_initialized():
+        print(f"Vault already initialized at {vault.vault}")
+        return
+    vault.init(git=not args.no_git)
+    print(f"Initialized vault at {bold(str(vault.vault))}")
+    print(f"  Run {bold('loom new <task>')} to start your first task.")
+
+
+def cmd_new(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Create a new task and tmux session."""
+    if not vault.is_initialized():
+        _die("Vault not initialized. Run: loom init")
+
+    slug = slugify(args.slug)
+    if not slug:
+        _die("Invalid task name.")
+
+    cwd = os.path.abspath(args.dir or os.getcwd())
+    goal = args.goal or ""
+    session_id = str(uuid.uuid4())
+    session_name = tmux.session_name(slug)
+
+    if tmux.session_exists(slug):
+        _die(f"Session {session_name} already exists. Use: loom go {slug}")
+
+    try:
+        vault.create_task(slug, session_id, cwd, goal)
+    except FileExistsError:
+        _die(f"Task '{slug}' already exists in the vault.")
+
+    state.upsert(slug, session_id=session_id, status="starting", cwd=cwd,
+                 tmux_session=session_name, project=Path(cwd).name)
+
+    if not tmux.new_session(slug, cwd, session_id):
+        # Clean up vault note if session creation failed
+        vault.task_path(slug).unlink(missing_ok=True)
+        state.remove(slug)
+        _die("Failed to create tmux session. Is tmux installed and running?")
+
+    print(f"{green('✓')} Created task {bold(slug)}")
+    print(f"  Session : {session_name}")
+    print(f"  CWD     : {cwd}")
+    print(f"  UUID    : {session_id}")
+    print(f"\n  Attach  : {bold(f'loom go {slug}')}")
+
+
+def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """List active tasks."""
+    if not vault.is_initialized():
+        print("No vault initialized. Run: loom init")
+        return
+
+    tasks = vault.list_tasks()
+    if not tasks:
+        print(dim("No active tasks."))
+        return
+
+    # Merge tmux session info
+    live_sessions = {s["slug"] for s in tmux.list_sessions()}
+    state_data = state.list_all()
+
+    col_task   = max((len(t.get("slug", "")) for t in tasks), default=4)
+    col_task   = max(col_task, 4)
+    col_status = 10
+    col_proj   = max((len(t.get("project", "")) for t in tasks), default=7)
+    col_proj   = max(col_proj, 7)
+
+    header = (
+        f"  {'TASK':<{col_task}}  {'STATUS':<{col_status}}  {'PROJECT':<{col_proj}}  {'AGE':>5}  CWD"
+    )
+    print(bold(header))
+    print(dim("  " + "─" * (len(header) - 2)))
+
+    for t in tasks:
+        slug    = t.get("slug", "")
+        status  = t.get("status", "idle")
+        project = t.get("project", "")
+        cwd     = t.get("cwd", "")
+        updated = t.get("updated", t.get("started", ""))
+        age     = format_age(updated)
+        alive   = "  " if slug in live_sessions else dim(" ∅")
+
+        # Shorten cwd
+        home = str(Path.home())
+        cwd_display = cwd.replace(home, "~")
+        if len(cwd_display) > 40:
+            cwd_display = "…" + cwd_display[-39:]
+
+        dot = _dot(status)
+        status_display = f"{status:<{col_status - 2}}"
+
+        print(f"{alive} {dot} {slug:<{col_task}}  {status_display}  {project:<{col_proj}}  {age:>5}  {dim(cwd_display)}")
+
+    print()
+    print(dim(f"  {len(tasks)} task(s)  ·  ∅ = no live session"))
+
+
+def cmd_go(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Attach to a task's tmux session."""
+    slug = args.slug
+    if not tmux.session_exists(slug):
+        # Offer to resume
+        task = vault.get_task(slug)
+        if task:
+            print(f"Session not running. Resume it with: {bold(f'loom resume {slug}')}")
+        else:
+            _die(f"No task or session found for '{slug}'.")
+        return
+    tmux.attach(slug)
+
+
+def cmd_resume(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Recreate a tmux session and resume the Claude session."""
+    slug = args.slug
+    task = vault.get_task(slug)
+    if not task:
+        _die(f"Task '{slug}' not found in vault.")
+
+    session_id = task.get("session_id", "")
+    if not session_id:
+        _die(f"Task '{slug}' has no session_id. Cannot resume.")
+
+    cwd = task.get("cwd", os.getcwd())
+
+    if tmux.session_exists(slug):
+        print(f"Session already exists — switching to it.")
+        tmux.attach(slug)
+        return
+
+    if not tmux.resume_in_session(slug, cwd, session_id):
+        _die("Failed to create tmux session.")
+
+    vault.update_task(slug, status="starting")
+    state.upsert(slug, status="starting")
+
+    print(f"{green('✓')} Resuming task {bold(slug)} with session {session_id}")
+    if not args.no_attach:
+        tmux.attach(slug)
+
+
+def cmd_done(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Mark a task as done: distill, archive, kill session."""
+    slug = args.slug
+    task = vault.get_task(slug)
+    if not task:
+        _die(f"Task '{slug}' not found.")
+
+    session_id = task.get("session_id", "")
+    distill = cfg.distill if not args.no_distill else "off"
+
+    # Distillation: open summary window before killing
+    if distill != "off" and tmux.session_exists(slug) and session_id:
+        if distill == "auto" or _confirm("Open distillation window?"):
+            print(f"Opening distillation window in {tmux.session_name(slug)}…")
+            tmux.open_distill_window(slug, session_id)
+            print("  Switch to the 'distill' window to review the summary.")
+            print(f"  When done, return here and run: {bold(f'loom done {slug} --no-distill')}")
+            return  # Let user review distillation first
+
+    if not _confirm(f"Mark '{slug}' as done and archive it?"):
+        return
+
+    # Kill session
+    if tmux.session_exists(slug):
+        tmux.kill_session(slug)
+        print(f"  Killed session {tmux.session_name(slug)}")
+
+    vault.update_task(slug, status="done")
+    vault.archive_task(slug)
+    state.remove(slug)
+
+    print(f"{green('✓')} Task {bold(slug)} archived to vault/90-Archive/")
+
+
+def cmd_web(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Start the web UI server."""
+    loom_dir = find_loom_dir()
+    server_script = loom_dir / "web" / "server.py"
+    if not server_script.exists():
+        _die(f"Web server not found at {server_script}")
+
+    port = args.port or cfg.web_port
+    bind = args.bind or cfg.web_bind
+
+    print(f"Starting loom web UI on {bold(f'http://{bind}:{port}')}")
+    if cfg.web_token:
+        print(f"  Token auth enabled — append {bold(f'?token=<your-token>')} to the URL")
+    print("  Press Ctrl+C to stop\n")
+
+    try:
+        subprocess.run([sys.executable, str(server_script), "--port", str(port), "--bind", bind])
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
+def cmd_sync(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Git-sync the vault (add, commit, pull --rebase, push)."""
+    v = vault.vault
+    if not (v / ".git").exists():
+        _die(f"Vault at {v} is not a git repo. Run: git init {v}")
+
+    def git(*cmd):
+        r = subprocess.run(["git", "-C", str(v), *cmd], capture_output=False)
+        return r.returncode == 0
+
+    vault.rebuild_dashboard()
+    git("add", "-A")
+
+    # Only commit if there's something to commit
+    diff = subprocess.run(["git", "-C", str(v), "diff", "--cached", "--quiet"])
+    if diff.returncode != 0:
+        git("commit", "-m", f"loom: auto-sync {_now_ts()}")
+
+    if not git("pull", "--rebase"):
+        print(yellow("Warning: pull --rebase had conflicts. Resolve manually."))
+
+    git("push")
+    print(f"{green('✓')} Vault synced.")
+
+
+def _now_ts():
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def cmd_rebuild(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Rebuild tasks.json cache from vault frontmatter."""
+    state.rebuild_from_vault(vault)
+    vault.rebuild_dashboard()
+    count = len(state.list_all())
+    print(f"{green('✓')} Rebuilt cache — {count} task(s).")
+
+
+def cmd_adr(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Create a new ADR in the vault."""
+    if not vault.is_initialized():
+        _die("Vault not initialized. Run: loom init")
+    title = " ".join(args.title)
+    path = vault.create_adr(title)
+    print(f"{green('✓')} Created {path.name}")
+    print(f"  Edit: {path}")
+
+
+def cmd_preview(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Show a live pane preview for a task."""
+    slug = args.slug
+    if not tmux.session_exists(slug):
+        _die(f"No live session for '{slug}'.")
+    print(bold(f"── {slug} ── window 0 pane 0 ──"))
+    print(tmux.capture_pane(slug, lines=args.lines))
+
+
+def cmd_send(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Send text input to a task's main pane."""
+    slug = args.slug
+    text = " ".join(args.text)
+    if not tmux.session_exists(slug):
+        _die(f"No live session for '{slug}'.")
+    if not args.yes and not _confirm(f"Send to {slug}: {repr(text)}"):
+        return
+    tmux.send_keys(slug, text, enter=not args.no_enter)
+    print(f"{green('✓')} Sent.")
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="loom",
+        description="tmux-based Claude Code workbench",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  loom new auth-refactor --dir ~/work/myapp\n"
+            "  loom ls\n"
+            "  loom go auth-refactor\n"
+            "  loom web\n"
+            "  loom sync\n"
+        ),
+    )
+    sub = p.add_subparsers(dest="command", metavar="<command>")
+
+    # init
+    p_init = sub.add_parser("init", help="Initialize the vault")
+    p_init.add_argument("--no-git", action="store_true", help="Skip git init")
+
+    # new
+    p_new = sub.add_parser("new", help="Create a new task")
+    p_new.add_argument("slug", help="Task name (will be slugified)")
+    p_new.add_argument("--dir", "-d", help="Working directory (default: cwd)")
+    p_new.add_argument("--goal", "-g", help="One-line goal description")
+
+    # ls
+    sub.add_parser("ls", help="List active tasks")
+
+    # go
+    p_go = sub.add_parser("go", help="Attach to a task session")
+    p_go.add_argument("slug", help="Task name")
+
+    # resume
+    p_resume = sub.add_parser("resume", help="Resume a task session")
+    p_resume.add_argument("slug", help="Task name")
+    p_resume.add_argument("--no-attach", action="store_true", help="Don't attach after creating session")
+
+    # done
+    p_done = sub.add_parser("done", help="Mark a task as done and archive it")
+    p_done.add_argument("slug", help="Task name")
+    p_done.add_argument("--no-distill", action="store_true", help="Skip distillation step")
+
+    # web
+    p_web = sub.add_parser("web", help="Start the web UI")
+    p_web.add_argument("--port", type=int, help="Port (default from config)")
+    p_web.add_argument("--bind", help="Bind address (default from config)")
+
+    # sync
+    sub.add_parser("sync", help="Git-sync the vault")
+
+    # rebuild
+    sub.add_parser("rebuild", help="Rebuild tasks.json from vault")
+
+    # adr
+    p_adr = sub.add_parser("adr", help="Create a new ADR")
+    p_adr.add_argument("title", nargs="+", help="ADR title")
+
+    # preview
+    p_prev = sub.add_parser("preview", help="Show pane preview for a task")
+    p_prev.add_argument("slug", help="Task name")
+    p_prev.add_argument("--lines", type=int, default=25, help="Lines to show")
+
+    # send
+    p_send = sub.add_parser("send", help="Send text to a task's main pane")
+    p_send.add_argument("slug", help="Task name")
+    p_send.add_argument("text", nargs="+", help="Text to send")
+    p_send.add_argument("--no-enter", action="store_true", help="Don't append Enter")
+    p_send.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+
+    return p
+
+
+_COMMANDS = {
+    "init":    cmd_init,
+    "new":     cmd_new,
+    "ls":      cmd_ls,
+    "go":      cmd_go,
+    "resume":  cmd_resume,
+    "done":    cmd_done,
+    "web":     cmd_web,
+    "sync":    cmd_sync,
+    "rebuild": cmd_rebuild,
+    "adr":     cmd_adr,
+    "preview": cmd_preview,
+    "send":    cmd_send,
+}
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    cfg, vault, state, tmux, notify = load_managers()
+
+    fn = _COMMANDS.get(args.command)
+    if fn is None:
+        _die(f"Unknown command: {args.command}")
+
+    try:
+        fn(args, cfg, vault, state, tmux, notify)
+    except KeyboardInterrupt:
+        print()
+
+
+if __name__ == "__main__":
+    main()

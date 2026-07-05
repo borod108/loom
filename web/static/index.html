@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>loom</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <span class="logo">🧵 loom</span>
+      <div class="header-right">
+        <span class="refresh-status" id="refresh-status">—</span>
+        <button class="btn-icon" id="btn-refresh" title="Refresh now">↻</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="task-list"></div>
+    <div id="empty-state" class="empty-state" hidden>
+      <p>No active tasks.</p>
+      <code>loom new my-task</code>
+    </div>
+  </main>
+
+  <!-- Send-input modal -->
+  <div id="modal-overlay" class="modal-overlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <span>Send to <strong id="modal-slug"></strong></span>
+        <button class="btn-icon" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="modal-input" rows="3" placeholder="Type input to send…"></textarea>
+        <label class="checkbox-row">
+          <input type="checkbox" id="modal-enter" checked>
+          <span>Append Enter</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
+        <button class="btn btn-primary" id="modal-send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

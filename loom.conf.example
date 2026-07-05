@@ -1,0 +1,43 @@
+# loom configuration — copy to ~/.config/loom/config and edit
+# Lines starting with # are comments. Values may use ~ for $HOME.
+
+# ── Vault ──────────────────────────────────────────────────────────────────
+# Path to your markdown vault directory.
+# This directory will be created by `loom init` if it doesn't exist.
+LOOM_VAULT="~/vault"
+
+# ── tmux ───────────────────────────────────────────────────────────────────
+# Prefix for tmux session names. Sessions are named <prefix>-<task-slug>.
+LOOM_SESSION_PREFIX="loom"
+
+# ── Web UI ─────────────────────────────────────────────────────────────────
+LOOM_WEB_PORT="7799"
+
+# Bind address. Use 0.0.0.0 to expose to LAN/remote. Use 127.0.0.1 for localhost-only.
+LOOM_WEB_BIND="0.0.0.0"
+
+# Optional Bearer token for web UI auth. Empty = no auth (only do this on localhost).
+# Access via: http://host:7799/?token=your-secret
+# LOOM_WEB_TOKEN=""
+
+# ── Distillation ───────────────────────────────────────────────────────────
+# auto   = open distillation window on PreCompact and `loom done`
+# manual = only on `loom done`
+# off    = never
+LOOM_DISTILL="auto"
+
+# Claude model to use for distillation windows.
+# (The model is selected when the interactive claude session starts.)
+LOOM_DISTILL_MODEL="claude-sonnet-4-5"
+
+# ── Notifications ──────────────────────────────────────────────────────────
+# Comma-separated list of backends to enable: notify-send, ntfy, bell
+LOOM_NOTIFICATIONS="notify-send"
+
+# ntfy settings (used when 'ntfy' is in LOOM_NOTIFICATIONS)
+# LOOM_NTFY_TOPIC="loom"
+# LOOM_NTFY_SERVER="https://ntfy.sh"
+
+# ── Skills ─────────────────────────────────────────────────────────────────
+# Skills are symlinked from <loom>/skills/ to ~/.claude/skills/ by install.sh.
+# No config needed; just re-run install.sh after adding a skill to the repo.
