@@ -696,18 +696,45 @@ class TmuxManager:
                 capture_output=True,
             )
 
+    # Claude Code UI chrome patterns — strip these from the bottom of the pane
+    _UI_CHROME_RE = re.compile(
+        r"^[\s─-╿❯❯]+$"   # separators (─━…) and empty prompt (❯)
+        r"|🤖"                             # status bar (robot emoji)
+        r"|(?:Sonnet|Opus|Haiku|Fable|Claude Code).{0,40}\$"  # model + cost
+        r"|←\s*for agents"                 # mode indicator
+        r"|⏵|shift\+tab|/effort"           # other mode badges
+    )
+
     def capture_pane(self, slug: str, lines: int = 25) -> str:
         name = self.session_name(slug)
-        # Try the named "claude" window first, fall back to index 0
         for target in [f"{name}:claude.0", f"{name}:0.0"]:
+            # -S -200: include scrollback so we see conversation above the prompt
             r = subprocess.run(
-                ["tmux", "capture-pane", "-p", "-t", target],
+                ["tmux", "capture-pane", "-p", "-S", "-200", "-t", target],
                 capture_output=True, text=True,
             )
-            if r.returncode == 0:
-                all_lines = r.stdout.splitlines()
-                tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-                return "\n".join(_ANSI_RE.sub("", l) for l in tail)
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+
+            all_lines = [_ANSI_RE.sub("", l) for l in r.stdout.splitlines()]
+
+            # Strip trailing blank lines
+            while all_lines and not all_lines[-1].strip():
+                all_lines.pop()
+
+            # Strip UI chrome from the bottom (status bar, separators, prompt)
+            while all_lines and self._UI_CHROME_RE.search(all_lines[-1]):
+                all_lines.pop()
+
+            # Strip blank lines again after removing chrome
+            while all_lines and not all_lines[-1].strip():
+                all_lines.pop()
+
+            if not all_lines:
+                continue
+
+            tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            return "\n".join(tail)
         return ""
 
     def send_keys(self, slug: str, text: str, enter: bool = True) -> bool:

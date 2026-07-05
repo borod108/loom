@@ -92,10 +92,13 @@ function renderTask(task) {
   // Inline preview — always visible for alive sessions, no click needed.
   // Updated from task.preview on every poll (included in /api/tasks response).
   let inlinePreview = '';
-  if (task.alive && task.preview) {
-    inlinePreview = `<pre class="pane-preview-inline" id="preview-${esc(task.slug)}">${esc(task.preview)}</pre>`;
-  } else if (task.alive) {
-    inlinePreview = `<pre class="pane-preview-inline pane-preview-empty" id="preview-${esc(task.slug)}">Loading…</pre>`;
+  if (task.alive) {
+    const previewText = task.preview || '';
+    const previewClass = previewText
+      ? 'pane-preview-inline'
+      : 'pane-preview-inline pane-preview-empty';
+    const previewContent = previewText || 'No output yet…';
+    inlinePreview = `<pre class="${previewClass}" id="preview-${esc(task.slug)}">${esc(previewContent)}</pre>`;
   }
 
   // Expand section: goal + cwd (extra context, not the preview)
@@ -188,11 +191,14 @@ function render() {
         const ageEl = old.querySelector('.task-age');
         if (ageEl) ageEl.textContent = task.age;
         // Update inline preview in place (no full re-render = no scroll jump)
-        if (task.alive && task.preview) {
+        if (task.alive) {
           const preEl = old.querySelector(`#preview-${task.slug}`);
           if (preEl) {
-            preEl.textContent = task.preview;
-            // Keep scrolled to bottom so newest output is always visible
+            const txt = task.preview || 'No output yet…';
+            preEl.textContent = txt;
+            preEl.className = task.preview
+              ? 'pane-preview-inline'
+              : 'pane-preview-inline pane-preview-empty';
             preEl.scrollTop = preEl.scrollHeight;
           }
         }
