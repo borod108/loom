@@ -328,16 +328,36 @@ def cmd_popup(args, cfg: Config, vault: VaultManager, state: StateManager, tmux:
 
 
 def cmd_go(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
-    """Attach to a task's tmux session."""
+    """Attach to a task's tmux session, resuming it automatically if not running."""
     slug = args.slug
+
     if not tmux.session_exists(slug):
-        # Offer to resume
         task = vault.get_task(slug)
-        if task:
-            print(f"Session not running. Resume it with: {bold(f'loom resume {slug}')}")
-        else:
-            _die(f"No task or session found for '{slug}'.")
-        return
+        if not task:
+            _die(f"No task '{slug}' found. Run: loom ls --all")
+
+        session_id = task.get("session_id", "")
+        if not session_id:
+            _die(f"Task '{slug}' has no session_id — cannot resume.")
+
+        cwd   = task.get("cwd", os.getcwd())
+        model = task.get("model", cfg.default_model)
+
+        print(f"  Session not running — resuming {bold(slug)}…")
+        if not tmux.resume_in_session(slug, cwd, session_id, model=model):
+            _die("Failed to create tmux session.")
+
+        # Restore extra windows from the last snapshot
+        saved_windows = vault.get_windows(slug)
+        if saved_windows:
+            extra = [w for w in saved_windows if w.get("idx", 0) > 0]
+            if extra:
+                tmux.restore_windows(slug, saved_windows, session_id, model=model)
+                print(f"  Restored windows: {', '.join(w['name'] for w in extra)}")
+
+        vault.update_task(slug, status="starting")
+        state.upsert(slug, status="starting")
+
     tmux.attach(slug)
 
 
