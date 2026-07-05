@@ -69,13 +69,13 @@ function renderTask(task) {
   const card = document.createElement('div');
   card.className = [
     'task-card',
-    expanded ? 'expanded' : '',
-    dead     ? 'dead'     : '',
-    archived ? 'archived' : '',
+    expanded  ? 'expanded'  : '',
+    dead      ? 'dead'      : '',
+    archived  ? 'archived'  : '',
   ].filter(Boolean).join(' ');
   card.dataset.slug = task.slug;
 
-  // Actions always visible in header — no expansion required
+  // Actions always visible in header
   let headerActions = '';
   if (task.alive) {
     headerActions = `
@@ -89,6 +89,24 @@ function renderTask(task) {
     ? `<span class="task-model" title="Model">${esc(task.model.replace('claude-',''))}</span>`
     : '';
 
+  // Inline preview — always visible for alive sessions, no click needed.
+  // Updated from task.preview on every poll (included in /api/tasks response).
+  let inlinePreview = '';
+  if (task.alive && task.preview) {
+    inlinePreview = `<pre class="pane-preview-inline" id="preview-${esc(task.slug)}">${esc(task.preview)}</pre>`;
+  } else if (task.alive) {
+    inlinePreview = `<pre class="pane-preview-inline pane-preview-empty" id="preview-${esc(task.slug)}">Loading…</pre>`;
+  }
+
+  // Expand section: goal + cwd (extra context, not the preview)
+  const expandSection = `
+    <div class="task-detail">
+      <div class="task-detail-inner">
+        <div class="task-cwd">📁 ${esc(task.cwd)}</div>
+        ${task.goal ? `<div class="task-goal">${esc(task.goal)}</div>` : ''}
+      </div>
+    </div>`;
+
   card.innerHTML = `
     <div class="task-header">
       <span class="status-dot ${statusCls}"></span>
@@ -101,21 +119,14 @@ function renderTask(task) {
         <div class="header-actions" onclick="event.stopPropagation()">
           ${headerActions}
         </div>
-        <span class="task-expand">▶</span>
+        ${task.alive ? `<span class="task-expand" title="Toggle goal/path">▶</span>` : ''}
       </div>
     </div>
-    <div class="task-detail">
-      <div class="task-detail-inner">
-        <div class="task-cwd">📁 ${esc(task.cwd)}</div>
-        ${task.goal ? `<div class="task-goal">${esc(task.goal)}</div>` : ''}
-        <div class="pane-preview" id="preview-${esc(task.slug)}">
-          <span class="pane-preview-empty">Click to load preview…</span>
-        </div>
-      </div>
-    </div>
+    ${inlinePreview}
+    ${expandSection}
   `;
 
-  // Header click → expand/collapse
+  // Header click → expand/collapse (shows goal + cwd)
   card.querySelector('.task-header').addEventListener('click', () => toggleExpand(task.slug));
 
   // Action buttons
@@ -126,9 +137,12 @@ function renderTask(task) {
     });
   });
 
-  // Load preview if expanded
-  if (expanded && task.alive) {
-    loadPreview(task.slug);
+  // Scroll inline preview to bottom after DOM insertion
+  if (task.alive && task.preview) {
+    requestAnimationFrame(() => {
+      const preEl = card.querySelector(`#preview-${task.slug}`);
+      if (preEl) preEl.scrollTop = preEl.scrollHeight;
+    });
   }
 
   return card;
@@ -173,6 +187,15 @@ function render() {
         // Update age in place
         const ageEl = old.querySelector('.task-age');
         if (ageEl) ageEl.textContent = task.age;
+        // Update inline preview in place (no full re-render = no scroll jump)
+        if (task.alive && task.preview) {
+          const preEl = old.querySelector(`#preview-${task.slug}`);
+          if (preEl) {
+            preEl.textContent = task.preview;
+            // Keep scrolled to bottom so newest output is always visible
+            preEl.scrollTop = preEl.scrollHeight;
+          }
+        }
       }
     } else {
       if (i < list.children.length) {

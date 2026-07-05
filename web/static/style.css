@@ -212,6 +212,29 @@ main {
   font-style: italic;
 }
 
+/* Inline pane preview — always visible for live sessions, no click needed */
+.pane-preview-inline {
+  display: block;
+  margin: 0;
+  padding: 0.6rem 1rem;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+  /* Scroll to bottom automatically so most-recent output is visible */
+  scroll-behavior: auto;
+}
+/* Keep working sessions' preview a little brighter */
+.task-card .pane-preview-inline { opacity: 0.9; }
+
+/* Expanded detail: goal + cwd (preview stays inline above this) */
 .pane-preview {
   background: var(--bg);
   border: 1px solid var(--border);

@@ -94,18 +94,17 @@ def _read_body(handler: "LoomHandler") -> dict:
 # API handlers
 # ---------------------------------------------------------------------------
 
-def _build_task_summary(slug: str, fields: dict) -> dict:
+def _build_task_summary(slug: str, fields: dict, include_preview: bool = False) -> dict:
     alive    = _tmux.session_exists(slug)
     status   = fields.get("status", "unknown")
     archived = fields.get("_archived", False)
-    # Compute display status
     if status in ("idle", "starting") and not alive and not archived:
         display_status = "dead"
     elif archived:
         display_status = "done"
     else:
         display_status = status
-    return {
+    result = {
         "slug":           slug,
         "status":         display_status,
         "raw_status":     status,
@@ -119,7 +118,11 @@ def _build_task_summary(slug: str, fields: dict) -> dict:
         "session":        _tmux.session_name(slug),
         "alive":          alive,
         "session_id":     fields.get("session_id", ""),
+        "preview":        "",
     }
+    if include_preview and alive:
+        result["preview"] = _tmux.capture_pane(slug, lines=12)
+    return result
 
 
 def api_tasks_list(handler: "LoomHandler"):
@@ -132,7 +135,7 @@ def api_tasks_list(handler: "LoomHandler"):
         t.pop("body", None)
         t.pop("path", None)
         if slug:
-            result.append(_build_task_summary(slug, t))
+            result.append(_build_task_summary(slug, t, include_preview=True))
     _json_response(handler, result)
 
 
