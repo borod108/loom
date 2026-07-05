@@ -3,6 +3,7 @@
 set -euo pipefail
 
 LOOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LOOM_DIR
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/loom"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/loom"
 SKILLS_DIR="${HOME}/.claude/skills"
@@ -65,8 +66,13 @@ ok "Wrote $CONFIG_DIR/loom_dir"
 # Create default config if not exists
 if [ ! -f "$CONFIG_DIR/config" ]; then
   VAULT_DEFAULT="$HOME/vault"
-  read -r -p "  Vault directory [$VAULT_DEFAULT]: " VAULT_INPUT
-  VAULT_PATH="${VAULT_INPUT:-$VAULT_DEFAULT}"
+  if [ -t 0 ]; then
+    read -r -p "  Vault directory [$VAULT_DEFAULT]: " VAULT_INPUT
+    VAULT_PATH="${VAULT_INPUT:-$VAULT_DEFAULT}"
+  else
+    VAULT_PATH="$VAULT_DEFAULT"
+    info "Non-interactive mode — using default vault: $VAULT_PATH"
+  fi
   VAULT_PATH="${VAULT_PATH/#\~/$HOME}"
 
   cat > "$CONFIG_DIR/config" <<EOF
