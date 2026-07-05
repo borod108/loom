@@ -626,8 +626,7 @@ class TmuxManager:
         # We pipe a plain list (no ANSI) so fzf can parse it cleanly.
         script = (
             f"{repr(loom_bin)} ls --plain 2>/dev/null"
-            " | tail -n +2"           # skip header
-            " | grep -v '^[[:space:]]*$'"  # skip blank lines
+            " | grep -v '^[[:space:]]*$'"  # skip blank lines (no header in --plain)
             " | fzf --ansi --no-sort --reverse"
             "   --prompt='loom ❯ '"
             "   --header='Enter=attach  Esc=cancel'"
