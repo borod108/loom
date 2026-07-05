@@ -107,11 +107,19 @@ def cmd_new(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: T
         state.remove(slug)
         _die("Failed to create tmux session. Is tmux installed and running?")
 
-    print(f"{green('✓')} Created task {bold(slug)}")
-    print(f"  Session : {session_name}")
-    print(f"  CWD     : {cwd}")
-    print(f"  UUID    : {session_id}")
-    print(f"\n  Attach  : {bold(f'loom go {slug}')}")
+    # Fire the goal as Claude's first prompt once the session is ready
+    if goal:
+        tmux.send_after_ready(slug, goal)
+        print(f"{green('✓')} Created task {bold(slug)}")
+        print(f"  Session : {session_name}")
+        print(f"  CWD     : {cwd}")
+        print(f"  Goal    : {dim(goal[:80] + ('…' if len(goal) > 80 else ''))}")
+        print(f"\n  Goal will be sent once Claude starts. Attach: {bold(f'loom go {slug}')}")
+    else:
+        print(f"{green('✓')} Created task {bold(slug)}")
+        print(f"  Session : {session_name}")
+        print(f"  CWD     : {cwd}")
+        print(f"\n  Attach  : {bold(f'loom go {slug}')}")
 
 
 def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
@@ -122,12 +130,11 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
 
     tasks = vault.list_tasks()
     if not tasks:
-        print(dim("No active tasks."))
+        print(dim("No active tasks.") if not getattr(args, "plain", False) else "")
         return
 
-    # Merge tmux session info
     live_sessions = {s["slug"] for s in tmux.list_sessions()}
-    state_data = state.list_all()
+    plain = getattr(args, "plain", False)
 
     col_task   = max((len(t.get("slug", "")) for t in tasks), default=4)
     col_task   = max(col_task, 4)
@@ -135,11 +142,12 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
     col_proj   = max((len(t.get("project", "")) for t in tasks), default=7)
     col_proj   = max(col_proj, 7)
 
-    header = (
-        f"  {'TASK':<{col_task}}  {'STATUS':<{col_status}}  {'PROJECT':<{col_proj}}  {'AGE':>5}  CWD"
-    )
-    print(bold(header))
-    print(dim("  " + "─" * (len(header) - 2)))
+    if not plain:
+        header = (
+            f"  {'TASK':<{col_task}}  {'STATUS':<{col_status}}  {'PROJECT':<{col_proj}}  {'AGE':>5}  CWD"
+        )
+        print(bold(header))
+        print(dim("  " + "─" * (len(header) - 2)))
 
     for t in tasks:
         slug    = t.get("slug", "")
@@ -150,7 +158,6 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
         age     = format_age(updated)
         alive   = "  " if slug in live_sessions else dim(" ∅")
 
-        # Shorten cwd
         home = str(Path.home())
         cwd_display = cwd.replace(home, "~")
         if len(cwd_display) > 40:
@@ -159,10 +166,27 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
         dot = _dot(status)
         status_display = f"{status:<{col_status - 2}}"
 
-        print(f"{alive} {dot} {slug:<{col_task}}  {status_display}  {project:<{col_proj}}  {age:>5}  {dim(cwd_display)}")
+        if plain:
+            # Clean output for fzf — no ANSI, slug first so awk can grab it
+            alive_plain = "●" if slug in live_sessions else "○"
+            print(f"{slug:<{col_task}}  {status:<{col_status - 2}}  {project:<{col_proj}}  {age:>5}  {cwd_display}")
+        else:
+            print(f"{alive} {dot} {slug:<{col_task}}  {status_display}  {project:<{col_proj}}  {age:>5}  {dim(cwd_display)}")
 
-    print()
-    print(dim(f"  {len(tasks)} task(s)  ·  ∅ = no live session"))
+    if not plain:
+        print()
+        print(dim(f"  {len(tasks)} task(s)  ·  ∅ = no live session"))
+
+
+def cmd_popup(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Open an fzf session picker in a tmux popup."""
+    loom_bin = str(Path(__file__).resolve())
+    try:
+        tmux.popup(loom_bin)
+    except FileNotFoundError as e:
+        _die(str(e))
+    except RuntimeError as e:
+        _die(str(e))
 
 
 def cmd_go(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
@@ -363,7 +387,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--goal", "-g", help="One-line goal description")
 
     # ls
-    sub.add_parser("ls", help="List active tasks")
+    p_ls = sub.add_parser("ls", help="List active tasks")
+    p_ls.add_argument("--plain", action="store_true", help="Plain output for scripting/fzf")
 
     # go
     p_go = sub.add_parser("go", help="Attach to a task session")
@@ -406,6 +431,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--no-enter", action="store_true", help="Don't append Enter")
     p_send.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
 
+    # popup
+    sub.add_parser("popup", help="fzf session picker in a tmux popup (bind to a key!)")
+
     return p
 
 
@@ -422,6 +450,7 @@ _COMMANDS = {
     "adr":     cmd_adr,
     "preview": cmd_preview,
     "send":    cmd_send,
+    "popup":   cmd_popup,
 }
 
 

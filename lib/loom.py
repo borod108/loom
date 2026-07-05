@@ -581,6 +581,63 @@ class TmuxManager:
             cmd.append("Enter")
         return subprocess.run(cmd, capture_output=True).returncode == 0
 
+    def send_after_ready(self, slug: str, text: str, timeout: int = 30):
+        """Send text to a session once Claude's prompt is visible (non-blocking).
+
+        Spawns a detached subprocess that polls the pane every 500ms and sends
+        `text` as soon as Claude's prompt appears.  Gives up after `timeout` s.
+        """
+        name = self.session_name(slug)
+        target = f"{name}:0.0"
+        # Inline script so it survives after loom new exits
+        script = (
+            "import subprocess,time,re\n"
+            f"target={repr(target)}\n"
+            f"text={repr(text)}\n"
+            f"timeout={timeout}\n"
+            "ansi=re.compile(r'\\x1B(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])')\n"
+            "def pane():\n"
+            "    r=subprocess.run(['tmux','capture-pane','-p','-t',target],capture_output=True,text=True)\n"
+            "    return ansi.sub('',r.stdout) if r.returncode==0 else ''\n"
+            "for _ in range(timeout*2):\n"
+            "    time.sleep(0.5)\n"
+            "    p=pane()\n"
+            # Claude ready: shows '>' prompt or any non-empty content beyond shell echo
+            "    if any(x in p for x in ['> ','?>','>\\n','Human:','\\u276f']):\n"
+            "        time.sleep(0.3)\n"
+            "        subprocess.run(['tmux','send-keys','-t',target,text,'Enter'])\n"
+            "        break\n"
+        )
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def popup(self, loom_bin: str):
+        """Open an fzf session picker in a tmux display-popup."""
+        if not shutil.which("fzf"):
+            raise FileNotFoundError("fzf not found — install it (e.g. dnf install fzf)")
+        if not os.environ.get("TMUX"):
+            raise RuntimeError("popup requires an active tmux session")
+
+        # Build a shell one-liner: list tasks, fzf pick, loom go
+        # We pipe a plain list (no ANSI) so fzf can parse it cleanly.
+        script = (
+            f"{repr(loom_bin)} ls --plain 2>/dev/null"
+            " | tail -n +2"           # skip header
+            " | grep -v '^[[:space:]]*$'"  # skip blank lines
+            " | fzf --ansi --no-sort --reverse"
+            "   --prompt='loom ❯ '"
+            "   --header='Enter=attach  Esc=cancel'"
+            " | awk '{print $1}'"     # first field = slug
+            f" | xargs -r {repr(loom_bin)} go"
+        )
+        subprocess.run(
+            ["tmux", "display-popup", "-E", "-w", "80%", "-h", "50%", script]
+        )
+
     def kill_session(self, slug: str) -> bool:
         name = self.session_name(slug)
         return subprocess.run(
