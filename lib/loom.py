@@ -357,6 +357,47 @@ class VaultManager:
         self.rebuild_dashboard()
         return True
 
+    def save_windows(self, slug: str, windows: List[Dict[str, Any]]) -> bool:
+        """Write the window snapshot as a ## Window State section in the task note."""
+        import json as _json
+        path = self.task_path(slug)
+        if not path.exists():
+            path = self.archive_path(slug)
+            if not path.exists():
+                return False
+        content = path.read_text()
+        block = (
+            f"\n## Window State\n\n"
+            f"```json\n{_json.dumps(windows, indent=2)}\n```\n"
+        )
+        # Replace existing section or append
+        section_re = re.compile(
+            r"\n## Window State\n.*?(?=\n## |\Z)", re.DOTALL
+        )
+        if section_re.search(content):
+            content = section_re.sub(block, content)
+        else:
+            content = content.rstrip() + "\n" + block
+        path.write_text(content)
+        return True
+
+    def get_windows(self, slug: str) -> List[Dict[str, Any]]:
+        """Read the saved window snapshot from the task note."""
+        import json as _json
+        task = self.get_task(slug)
+        if not task:
+            return []
+        body = task.get("body", "")
+        m = re.search(
+            r"## Window State\n+```json\n(.*?)\n```", body, re.DOTALL
+        )
+        if not m:
+            return []
+        try:
+            return _json.loads(m.group(1))
+        except (ValueError, TypeError):
+            return []
+
     def link_doc(self, slug: str, doc_path: str) -> bool:
         """Append a document link to the task note's Linked Documents section."""
         path = self.task_path(slug)
@@ -562,7 +603,7 @@ class TmuxManager:
         name = self.session_name(slug)
         cwd = os.path.expanduser(cwd)
         r = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", name, "-c", cwd],
+            ["tmux", "new-session", "-d", "-s", name, "-c", cwd, "-n", "claude"],
             capture_output=True,
         )
         if r.returncode != 0:
@@ -571,14 +612,14 @@ class TmuxManager:
         if model:
             cmd += f" --model {model}"
         cmd += f" --session-id {session_id}"
-        subprocess.run(["tmux", "send-keys", "-t", f"{name}:0.0", cmd, "Enter"])
+        subprocess.run(["tmux", "send-keys", "-t", f"{name}:claude.0", cmd, "Enter"])
         return True
 
     def resume_in_session(self, slug: str, cwd: str, session_id: str, model: str = "") -> bool:
         name = self.session_name(slug)
         cwd = os.path.expanduser(cwd)
         r = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", name, "-c", cwd],
+            ["tmux", "new-session", "-d", "-s", name, "-c", cwd, "-n", "claude"],
             capture_output=True,
         )
         if r.returncode != 0:
@@ -597,20 +638,84 @@ class TmuxManager:
         else:
             os.execlp("tmux", "tmux", "attach", "-t", name)
 
-    def capture_pane(self, slug: str, lines: int = 25) -> str:
+    def snapshot_windows(self, slug: str) -> List[Dict[str, Any]]:
+        """Return the current window list for a session: [{idx, name, path}]."""
         name = self.session_name(slug)
         r = subprocess.run(
-            ["tmux", "capture-pane", "-p", "-t", f"{name}:0.0"],
+            ["tmux", "list-windows", "-t", name,
+             "-F", "#{window_index}\t#{window_name}\t#{pane_current_path}"],
             capture_output=True, text=True,
         )
         if r.returncode != 0:
-            return ""
-        all_lines = r.stdout.splitlines()
-        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-        return "\n".join(_ANSI_RE.sub("", l) for l in tail)
+            return []
+        windows = []
+        for line in r.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                home = str(Path.home())
+                path = parts[2].replace(home, "~")
+                windows.append({
+                    "idx":  int(parts[0]),
+                    "name": parts[1],
+                    "path": path,
+                })
+        return windows
+
+    def restore_windows(
+        self, slug: str, windows: List[Dict[str, Any]], session_id: str, model: str = ""
+    ):
+        """Recreate saved windows in an existing session.
+
+        Window 0 (always named 'claude') is already created by resume_in_session.
+        Additional windows are created with their saved names and working dirs.
+        """
+        name = self.session_name(slug)
+        for w in windows:
+            idx   = w.get("idx", 0)
+            wname = w.get("name", f"win{idx}")
+            path  = os.path.expanduser(w.get("path", "~"))
+
+            if idx == 0:
+                # Rename window 0 if it was given a custom name (not "claude")
+                if wname and wname != "claude":
+                    subprocess.run(
+                        ["tmux", "rename-window", "-t", f"{name}:0", wname],
+                        capture_output=True,
+                    )
+                continue
+
+            # Create extra windows with saved names and directories
+            subprocess.run(
+                ["tmux", "new-window", "-t", name, "-n", wname, "-c", path],
+                capture_output=True,
+            )
+
+    def capture_pane(self, slug: str, lines: int = 25) -> str:
+        name = self.session_name(slug)
+        # Try the named "claude" window first, fall back to index 0
+        for target in [f"{name}:claude.0", f"{name}:0.0"]:
+            r = subprocess.run(
+                ["tmux", "capture-pane", "-p", "-t", target],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                all_lines = r.stdout.splitlines()
+                tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+                return "\n".join(_ANSI_RE.sub("", l) for l in tail)
+        return ""
 
     def send_keys(self, slug: str, text: str, enter: bool = True) -> bool:
         name = self.session_name(slug)
+        # Send to the "claude" window
+        for target in [f"{name}:claude.0", f"{name}:0.0"]:
+            r = subprocess.run(
+                ["tmux", "has-session", "-t", target], capture_output=True
+            )
+            if r.returncode == 0:
+                cmd = ["tmux", "send-keys", "-t", target, text]
+                if enter:
+                    cmd.append("Enter")
+                return subprocess.run(cmd, capture_output=True).returncode == 0
         cmd = ["tmux", "send-keys", "-t", f"{name}:0.0", text]
         if enter:
             cmd.append("Enter")

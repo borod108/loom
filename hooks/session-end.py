@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hook: SessionEnd — mark task as idle when Claude session ends."""
+"""Hook: SessionEnd — snapshot windows and mark task as idle when Claude exits."""
 
 import sys
 import os
@@ -9,7 +9,7 @@ from _lib import setup
 
 data = setup()
 
-from loom import Config, VaultManager, StateManager
+from loom import Config, VaultManager, StateManager, TmuxManager
 
 try:
     session_id = data.get("session_id", "")
@@ -19,15 +19,28 @@ try:
     cfg   = Config()
     vault = VaultManager(cfg)
     state = StateManager(cfg)
+    tmux  = TmuxManager(cfg)
 
     slug = vault.find_by_session_id(session_id)
-    if slug:
-        task = vault.get_task(slug)
-        # Only flip to idle if not already marked done by `loom done`
-        if task and task.get("status") not in ("done", "archived"):
-            vault.update_task(slug, status="idle")
-            vault.append_log(slug, "Claude session ended (session-end hook)")
-            state.upsert(slug, status="idle")
+    if not slug:
+        sys.exit(0)
+
+    task = vault.get_task(slug)
+    if not task:
+        sys.exit(0)
+
+    # Snapshot all windows while the tmux session is still alive.
+    # This lets `loom resume` restore extra windows after a restart.
+    if tmux.session_exists(slug):
+        windows = tmux.snapshot_windows(slug)
+        if windows:
+            vault.save_windows(slug, windows)
+
+    # Only flip to idle if not already marked done by `loom done`
+    if task.get("status") not in ("done", "archived"):
+        vault.update_task(slug, status="idle")
+        vault.append_log(slug, "Claude session ended")
+        state.upsert(slug, status="idle")
 
 except Exception as e:
     print(f"loom session-end hook error: {e}", file=sys.stderr)

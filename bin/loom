@@ -304,15 +304,41 @@ def cmd_resume(args, cfg: Config, vault: VaultManager, state: StateManager, tmux
             tmux.attach(slug)
         return
 
-    if not tmux.resume_in_session(slug, cwd, session_id):
+    model = getattr(args, "model", None) or task.get("model", "")
+
+    if not tmux.resume_in_session(slug, cwd, session_id, model=model):
         _die("Failed to create tmux session.")
 
     vault.update_task(slug, status="starting")
     state.upsert(slug, status="starting")
 
+    # Restore extra windows from the last snapshot
+    saved_windows = vault.get_windows(slug)
+    if saved_windows:
+        extra = [w for w in saved_windows if w.get("idx", 0) > 0]
+        if extra:
+            tmux.restore_windows(slug, saved_windows, session_id, model=model)
+            names = [w["name"] for w in extra]
+            print(f"{green('✓')} Restored {len(extra)} extra window(s): {', '.join(names)}")
+
     print(f"{green('✓')} Resuming task {bold(slug)}")
+    if saved_windows:
+        print(f"  Windows: {', '.join(w['name'] for w in saved_windows)}")
     if not args.no_attach:
         tmux.attach(slug)
+
+
+def cmd_snapshot(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Save the current window layout for a task (auto-saved on session end)."""
+    slug = args.slug
+    if not tmux.session_exists(slug):
+        _die(f"No live session for '{slug}'. Window state is auto-saved when Claude exits.")
+    windows = tmux.snapshot_windows(slug)
+    if not windows:
+        _die("No windows found in session.")
+    vault.save_windows(slug, windows)
+    names = [f"{w['idx']}:{w['name']}" for w in windows]
+    print(f"{green('✓')} Saved {len(windows)} window(s): {', '.join(names)}")
 
 
 def cmd_done(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
@@ -541,6 +567,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_link.add_argument("slug", help="Task name")
     p_link.add_argument("doc", help="Path to document (absolute or vault-relative)")
 
+    # snapshot
+    p_snap = sub.add_parser("snapshot", help="Save current window layout (auto on session exit)")
+    p_snap.add_argument("slug", help="Task name")
+
     return p
 
 
@@ -558,7 +588,8 @@ _COMMANDS = {
     "preview": cmd_preview,
     "send":    cmd_send,
     "popup":   cmd_popup,
-    "link":    cmd_link,
+    "link":     cmd_link,
+    "snapshot": cmd_snapshot,
 }
 
 
