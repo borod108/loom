@@ -217,8 +217,18 @@ def cmd_resume(args, cfg: Config, vault: VaultManager, state: StateManager, tmux
     cwd = task.get("cwd", os.getcwd())
 
     if tmux.session_exists(slug):
-        print(f"Session already exists — switching to it.")
-        tmux.attach(slug)
+        # Session exists — check if claude is actually running in it
+        pane = tmux.capture_pane(slug, lines=6)
+        claude_running = any(x in pane for x in ["🤖", "Sonnet", "Haiku", "Opus", "claude "])
+        if claude_running:
+            print(f"{green('✓')} Claude is running — attaching to {bold(tmux.session_name(slug))}")
+        else:
+            print(f"  Session exists but Claude is not running — sending resume command…")
+            tmux.send_keys(slug, f"claude --resume {session_id}")
+            vault.update_task(slug, status="starting")
+            state.upsert(slug, status="starting")
+        if not args.no_attach:
+            tmux.attach(slug)
         return
 
     if not tmux.resume_in_session(slug, cwd, session_id):
@@ -227,7 +237,7 @@ def cmd_resume(args, cfg: Config, vault: VaultManager, state: StateManager, tmux
     vault.update_task(slug, status="starting")
     state.upsert(slug, status="starting")
 
-    print(f"{green('✓')} Resuming task {bold(slug)} with session {session_id}")
+    print(f"{green('✓')} Resuming task {bold(slug)}")
     if not args.no_attach:
         tmux.attach(slug)
 

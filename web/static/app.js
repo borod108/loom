@@ -63,6 +63,12 @@ function renderTask(task) {
   card.className = `task-card${expanded ? ' expanded' : ''}${dead ? ' dead' : ''}`;
   card.dataset.slug = task.slug;
 
+  // Actions always visible in header — no expansion required
+  const headerActions = task.alive
+    ? `<button class="btn btn-sm btn-secondary" data-action="send" data-slug="${esc(task.slug)}" title="Send input">✏</button>
+       <button class="btn btn-sm btn-danger"    data-action="kill" data-slug="${esc(task.slug)}" title="Kill session">✕</button>`
+    : `<button class="btn btn-sm btn-ghost"     data-action="resume" data-slug="${esc(task.slug)}" title="Resume Claude">▶ Resume</button>`;
+
   card.innerHTML = `
     <div class="task-header">
       <span class="status-dot ${statusDotClass(task.status)}"></span>
@@ -71,6 +77,9 @@ function renderTask(task) {
         <span class="status-badge ${statusDotClass(task.status)}">${esc(task.status)}</span>
         ${task.project ? `<span class="task-project">${esc(task.project)}</span>` : ''}
         <span class="task-age">${esc(task.age)}</span>
+        <div class="header-actions" onclick="event.stopPropagation()">
+          ${headerActions}
+        </div>
         <span class="task-expand">▶</span>
       </div>
     </div>
@@ -79,12 +88,7 @@ function renderTask(task) {
         <div class="task-cwd">📁 ${esc(task.cwd)}</div>
         ${task.goal ? `<div class="task-goal">${esc(task.goal)}</div>` : ''}
         <div class="pane-preview" id="preview-${esc(task.slug)}">
-          <span class="pane-preview-empty">Loading preview…</span>
-        </div>
-        <div class="task-actions">
-          ${task.alive ? `<button class="btn btn-secondary" data-action="send" data-slug="${esc(task.slug)}">✏ Send input</button>` : ''}
-          ${task.alive ? `<button class="btn btn-danger" data-action="kill" data-slug="${esc(task.slug)}">✕ Kill session</button>` : ''}
-          <button class="btn btn-ghost" data-action="attach" data-slug="${esc(task.slug)}">⌗ Attach</button>
+          <span class="pane-preview-empty">Click to load preview…</span>
         </div>
       </div>
     </div>
@@ -198,8 +202,14 @@ function handleAction(action, slug) {
     if (confirm(`Kill session for '${slug}'?`)) {
       killSession(slug).then(() => refresh());
     }
+  } else if (action === 'resume') {
+    const task = tasks.find(t => t.slug === slug);
+    const sid = task?.session_id || '';
+    if (!sid) { alert('No session_id — cannot resume.'); return; }
+    sendInput(slug, `claude --resume ${sid}`, true)
+      .then(() => { refresh(); })
+      .catch(() => alert('Resume failed — session may not have a running shell.'));
   } else if (action === 'attach') {
-    // Best-effort tmux deep link
     alert(`Run in your terminal:\n  loom go ${slug}`);
   }
 }

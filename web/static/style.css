@@ -144,8 +144,22 @@ main {
   color: var(--dim);
   font-size: 0.75rem;
   transition: transform 0.2s;
+  flex-shrink: 0;
 }
 .task-card.expanded .task-expand { transform: rotate(90deg); }
+
+/* Always-visible action buttons in card header */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+.btn-sm {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
 
 /* Dead session indicator */
 .task-card.dead .task-slug::after {
