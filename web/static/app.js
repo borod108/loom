@@ -257,8 +257,11 @@ function handleAction(action, slug) {
   if (action === 'send') {
     openModal(slug);
   } else if (action === 'kill') {
-    if (confirm(`Kill session for '${slug}'?`)) {
+    const answer = prompt(`Type the task name to confirm kill:\n\n  ${slug}`);
+    if (answer === slug) {
       killSession(slug).then(() => refresh());
+    } else if (answer !== null) {
+      alert('Name did not match — session not killed.');
     }
   } else if (action === 'resume') {
     const task = tasks.find(t => t.slug === slug);
