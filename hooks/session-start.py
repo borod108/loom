@@ -25,6 +25,24 @@ try:
         sys.exit(0)
 
     slug = vault.find_by_session_id(session_id)
+
+    # Opt-in (LOOM_ADOPT_UNMANAGED=1): register sessions started outside loom
+    # so ALL Claude work lands in the vault, not just `loom new` tasks.
+    if not slug and cwd and vault.is_initialized() \
+            and cfg.get("LOOM_ADOPT_UNMANAGED") in ("1", "true"):
+        from pathlib import Path
+        from loom import slugify
+        base = slugify(Path(cwd).name) or "session"
+        slug = f"{base}-{session_id[:8]}"
+        try:
+            vault.create_task(slug, session_id, cwd,
+                              goal="_unmanaged session (started outside loom)_")
+            vault.update_task(slug, unmanaged="true")
+        except FileExistsError:
+            pass
+        state.upsert(slug, session_id=session_id, cwd=cwd,
+                     project=Path(cwd).name, unmanaged=True)
+
     if slug:
         # Known task — update with fresh transcript path and status
         vault.update_task(slug, status="waiting", transcript_path=transcript)
@@ -47,10 +65,16 @@ As you work, write knowledge to the vault so it persists across sessions:
 
 The /recall skill searches the vault for prior work on any topic. Use it at the start of new investigations."""
 
-        # Return additionalContext so Claude sees vault instructions each session
+        # Return additionalContext so Claude sees vault instructions each session.
+        # Must be nested under hookSpecificOutput or Claude Code ignores it.
         import json as _json
-        print(_json.dumps({"additionalContext": context}))
-    # Unknown session (started outside loom) — do NOT auto-register.
+        print(_json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        }))
+    # Unknown session with LOOM_ADOPT_UNMANAGED unset — leave untracked.
 
 except Exception as e:
     print(f"loom session-start hook error: {e}", file=sys.stderr)

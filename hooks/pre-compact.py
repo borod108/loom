@@ -51,12 +51,14 @@ try:
                     except json.JSONDecodeError:
                         pass
 
-            # Collect the last few assistant text blocks before compaction
+            # Collect the last few assistant text blocks before compaction.
+            # Transcript lines wrap the API message: {"type": "assistant",
+            # "message": {"role": "assistant", "content": [...]}, ...}
             recent = []
-            for msg in messages[-12:]:
-                if msg.get("role") != "assistant":
+            for msg in messages[-40:]:
+                if msg.get("type") != "assistant":
                     continue
-                content = msg.get("content", [])
+                content = msg.get("message", {}).get("content", [])
                 if isinstance(content, str):
                     recent.append(content.strip())
                 elif isinstance(content, list):
@@ -88,7 +90,8 @@ try:
 
     # Optionally open an interactive distillation window for the user
     if cfg.distill == "auto" and tmux.session_exists(slug):
-        tmux.open_distill_window(slug, session_id)
+        task = vault.get_task(slug) or {}
+        tmux.open_distill_window(slug, session_id, cwd=task.get("cwd", ""))
 
 except Exception as e:
     print(f"loom pre-compact hook error: {e}", file=sys.stderr)

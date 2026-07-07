@@ -24,8 +24,11 @@ class Config:
         "LOOM_VAULT": str(Path.home() / "vault"),
         "LOOM_SESSION_PREFIX": "loom",
         "LOOM_WEB_PORT": "7799",
-        "LOOM_WEB_BIND": "0.0.0.0",
+        "LOOM_WEB_BIND": "",   # empty = auto: 0.0.0.0 with token, else 127.0.0.1
         "LOOM_WEB_TOKEN": "",
+        "LOOM_WEB_URL": "",    # public URL of the web UI (used in notification links)
+        "LOOM_ADOPT_UNMANAGED": "0",  # 1 = register Claude sessions started outside loom
+        "LOOM_NOTIFY_ON_STOP": "0",   # 1 = desktop-notify when a task finishes a turn
         "LOOM_DISTILL": "auto",
         "LOOM_DISTILL_MODEL": "claude-sonnet-4-5",
         "LOOM_DEFAULT_MODEL": "claude-opus-4-6",
@@ -74,7 +77,11 @@ class Config:
 
     @property
     def web_bind(self) -> str:
-        return self.get("LOOM_WEB_BIND")
+        bind = self.get("LOOM_WEB_BIND")
+        if bind:
+            return bind
+        # Secure default: only expose beyond localhost when auth is configured
+        return "0.0.0.0" if self.web_token else "127.0.0.1"
 
     @property
     def web_token(self) -> str:
@@ -324,9 +331,17 @@ class VaultManager:
             return False
         content = path.read_text()
         log_line = f"- {_now_iso()} {message}\n"
-        if "## Log\n" in content:
-            # Append after "## Log" section header
-            content += log_line
+        # Insert at the END of the "## Log" section (before the next heading),
+        # not at end-of-file where it would land in an unrelated section.
+        idx = content.find("## Log")
+        if idx != -1:
+            nxt = content.find("\n## ", idx + len("## Log"))
+            if nxt == -1:
+                content = content.rstrip() + "\n" + log_line
+            else:
+                content = content[:nxt].rstrip() + "\n" + log_line + content[nxt:]
+        else:
+            content = content.rstrip() + "\n\n## Log\n\n" + log_line
         path.write_text(content)
         return True
 
@@ -547,7 +562,8 @@ class StateManager:
         return self._load()
 
     def rebuild_from_vault(self, vault: VaultManager):
-        tasks = vault.list_tasks()
+        # Include archived tasks so the cache matches the vault after `loom done`
+        tasks = vault.list_tasks(include_archived=True)
         data = {}
         for t in tasks:
             slug = t.pop("slug", None)
@@ -621,7 +637,9 @@ class TmuxManager:
         if model:
             cmd += f" --model {model}"
         cmd += f" --session-id {session_id}"
-        subprocess.run(["tmux", "send-keys", "-t", f"{name}:claude.0", cmd, "Enter"])
+        # Target the window by name only — pane indices depend on the user's
+        # pane-base-index setting, so ":claude.0" breaks with base-index 1.
+        subprocess.run(["tmux", "send-keys", "-t", f"{name}:claude", cmd, "Enter"])
         return True
 
     def resume_in_session(self, slug: str, cwd: str, session_id: str, model: str = "") -> bool:
@@ -637,13 +655,24 @@ class TmuxManager:
         if model:
             cmd += f" --model {model}"
         cmd += f" --resume {session_id}"
-        subprocess.run(["tmux", "send-keys", "-t", f"{name}:0.0", cmd, "Enter"])
+        subprocess.run(["tmux", "send-keys", "-t", f"{name}:claude", cmd, "Enter"])
         return True
 
     def attach(self, slug: str):
         name = self.session_name(slug)
         if os.environ.get("TMUX"):
-            subprocess.run(["tmux", "switch-client", "-t", name])
+            # Switch the client this command was invoked from — with several
+            # attached clients a bare switch-client picks one arbitrarily.
+            r = subprocess.run(
+                ["tmux", "display-message", "-p", "#{client_tty}"],
+                capture_output=True, text=True,
+            )
+            tty = r.stdout.strip()
+            cmd = ["tmux", "switch-client"]
+            if tty and tty != "%":
+                cmd += ["-c", tty]
+            cmd += ["-t", name]
+            subprocess.run(cmd)
         else:
             os.execlp("tmux", "tmux", "attach", "-t", name)
 
@@ -679,16 +708,19 @@ class TmuxManager:
         Additional windows are created with their saved names and working dirs.
         """
         name = self.session_name(slug)
+        # The main (claude) window is the lowest index in the snapshot — its
+        # actual number depends on the user's base-index setting.
+        main_idx = min((w.get("idx", 0) for w in windows), default=0)
         for w in windows:
             idx   = w.get("idx", 0)
             wname = w.get("name", f"win{idx}")
             path  = os.path.expanduser(w.get("path", "~"))
 
-            if idx == 0:
-                # Rename window 0 if it was given a custom name (not "claude")
+            if idx == main_idx:
+                # Rename the main window if it was given a custom name
                 if wname and wname != "claude":
                     subprocess.run(
-                        ["tmux", "rename-window", "-t", f"{name}:0", wname],
+                        ["tmux", "rename-window", "-t", f"{name}:claude", wname],
                         capture_output=True,
                     )
                 continue
@@ -703,14 +735,16 @@ class TmuxManager:
     _UI_CHROME_RE = re.compile(
         r"^[\s─-╿❯❯]+$"   # separators (─━…) and empty prompt (❯)
         r"|🤖"                             # status bar (robot emoji)
-        r"|(?:Sonnet|Opus|Haiku|Fable|Claude Code).{0,40}\$"  # model + cost
+        r"|(?:Sonnet|Opus|Haiku|Fable|Claude Code).*(?:\$|%)"  # model + cost/usage bar
         r"|←\s*for agents"                 # mode indicator
         r"|⏵|shift\+tab|/effort"           # other mode badges
     )
 
     def capture_pane(self, slug: str, lines: int = 25) -> str:
         name = self.session_name(slug)
-        for target in [f"{name}:claude.0", f"{name}:0.0"]:
+        # Window-name target first, bare session (= active window) as fallback;
+        # never hardcode pane indices (pane-base-index varies).
+        for target in [f"{name}:claude", name]:
             # -S -200: include scrollback so we see conversation above the prompt
             r = subprocess.run(
                 ["tmux", "capture-pane", "-p", "-S", "-200", "-t", target],
@@ -742,22 +776,30 @@ class TmuxManager:
 
     def send_keys(self, slug: str, text: str, enter: bool = True) -> bool:
         name = self.session_name(slug)
-        # Send to the "claude" window
-        for target in [f"{name}:claude.0", f"{name}:0.0"]:
+        # Send to the "claude" window; fall back to the session's active window
+        for target in [f"{name}:claude", name]:
             r = subprocess.run(
                 ["tmux", "has-session", "-t", target], capture_output=True
             )
             if r.returncode == 0:
-                cmd = ["tmux", "send-keys", "-t", target, text]
-                if enter:
-                    cmd.append("Enter")
-                return subprocess.run(cmd, capture_output=True).returncode == 0
-        cmd = ["tmux", "send-keys", "-t", f"{name}:0.0", text]
-        if enter:
-            cmd.append("Enter")
-        return subprocess.run(cmd, capture_output=True).returncode == 0
+                ok = subprocess.run(
+                    ["tmux", "send-keys", "-t", target, text],
+                    capture_output=True,
+                ).returncode == 0
+                if ok and enter:
+                    # Claude Code's TUI treats text+Enter in one send-keys as a
+                    # paste and leaves it in the input box; send Enter separately.
+                    import time as _time
+                    _time.sleep(0.35)
+                    subprocess.run(
+                        ["tmux", "send-keys", "-t", target, "Enter"],
+                        capture_output=True,
+                    )
+                return ok
+        return False
 
-    def send_after_ready(self, slug: str, text: str, timeout: int = 30):
+    def send_after_ready(self, slug: str, text: str, timeout: int = 300,
+                         window: str = "claude"):
         """Send text to a session once Claude's prompt is visible (non-blocking).
 
         On systemd-based Linux (Fedora, Ubuntu, etc.) plain Popen children are
@@ -766,8 +808,9 @@ class TmuxManager:
         Falls back to a tmux window for non-systemd systems.
         """
         name = self.session_name(slug)
-        # Target the named 'claude' window; watcher will try both
-        targets = [f"{name}:claude.0", f"{name}:0.0"]
+        # Target the named window; fall back to the active window only for
+        # the main claude window (a distill window must never fall back).
+        targets = [f"{name}:{window}", name] if window == "claude" else [f"{name}:{window}"]
 
         # Write watcher to a temp file — avoids quoting hell in -c strings
         import tempfile
@@ -789,24 +832,29 @@ def pane():
     return targets[0], ''
 
 def claude_ready(p):
-    # The 🤖 robot emoji appears in Claude's status bar ONLY after it is fully
-    # initialised and any trust dialog has been resolved.  Checking for the
-    # input-prompt glyph (❯) alone is not sufficient because it also appears
-    # inside the trust-workspace dialog that Claude shows in new directories.
-    robot = chr(0x1F916)   # 🤖
+    # NEVER send while a dialog is on screen — the trailing Enter would
+    # answer the dialog (e.g. auto-accept the workspace-trust prompt).
+    low = p.lower()
+    if 'trust this folder' in low or 'safety check' in low or 'esc to cancel' in low:
+        return False
+    robot = chr(0x1F916)   # 🤖 status bar (only after full init on some setups)
     if robot in p:
         return True
-    # Fallback: status-bar model name + separator line (works on emoji-less terms)
-    has_model = any(m in p for m in ('Sonnet', 'Opus', 'Haiku', 'Fable', 'Claude Code'))
-    has_bar   = ('\\u2500' * 10) in p  # ─────────── separator
-    return has_model and has_bar
+    # Fallback: status-bar model name + an input-prompt line starting with ❯.
+    # The plain shell (before claude launches) has neither a capitalised model
+    # name nor the claude prompt, so this cannot fire early.
+    has_model  = any(m in p for m in ('Sonnet', 'Opus', 'Haiku', 'Fable'))
+    has_prompt = any(l.lstrip().startswith(chr(0x276F)) for l in p.splitlines())
+    return has_model and has_prompt
 
 for _ in range({timeout * 2}):
     time.sleep(0.5)
     target, p = pane()
     if claude_ready(p):
         time.sleep(0.5)  # small extra settle
-        subprocess.run(['tmux', 'send-keys', '-t', target, text, 'Enter'])
+        subprocess.run(['tmux', 'send-keys', '-t', target, text])
+        time.sleep(0.35)  # separate Enter — paste+Enter in one call is not submitted
+        subprocess.run(['tmux', 'send-keys', '-t', target, 'Enter'])
         break
 
 try:
@@ -840,8 +888,6 @@ except OSError:
         selected slug to a tempfile, the popup closes, then we switch-client
         from the outer shell after display-popup returns.
         """
-        if not shutil.which("fzf"):
-            raise FileNotFoundError("fzf not found — install it (e.g. dnf install fzf)")
         if not os.environ.get("TMUX"):
             raise RuntimeError("popup requires an active tmux session")
 
@@ -849,15 +895,28 @@ except OSError:
         sel_file = tempfile.mktemp(suffix=".loom-sel")
 
         try:
-            # fzf writes selection to sel_file; we don't run loom go inside the popup
-            script = (
-                f"{repr(loom_bin)} ls --plain 2>/dev/null"
-                " | grep -v '^[[:space:]]*$'"
-                " | fzf --ansi --no-sort --reverse"
-                "   --prompt='loom ❯ '"
-                "   --header='Enter=attach  Esc=cancel'"
-                f"  > {repr(sel_file)}"
-            )
+            if shutil.which("fzf"):
+                # fzf writes selection to sel_file; we don't run loom go inside the popup
+                script = (
+                    f"{repr(loom_bin)} ls --plain 2>/dev/null"
+                    " | grep -v '^[[:space:]]*$'"
+                    " | fzf --ansi --no-sort --reverse"
+                    "   --prompt='loom ❯ '"
+                    "   --header='Enter=attach  Esc=cancel'"
+                    f"  > {repr(sel_file)}"
+                )
+            else:
+                # Numbered fallback picker when fzf is not installed
+                script = (
+                    f"{repr(loom_bin)} ls --plain 2>/dev/null"
+                    " | grep -v '^[[:space:]]*$' | nl -w2 -s'. ';"
+                    " printf 'number> ';"
+                    " read n;"
+                    f" {repr(loom_bin)} ls --plain 2>/dev/null"
+                    " | grep -v '^[[:space:]]*$'"
+                    " | sed -n \"${n}p\""
+                    f" > {repr(sel_file)}"
+                )
             subprocess.run(
                 ["tmux", "display-popup", "-E", "-w", "80%", "-h", "50%", script]
             )
@@ -879,29 +938,34 @@ except OSError:
             ["tmux", "kill-session", "-t", name], capture_output=True
         ).returncode == 0
 
-    def open_distill_window(self, slug: str, session_id: str):
-        """Open a 'distill' window in the task session for summarization."""
+    def open_distill_window(self, slug: str, session_id: str, cwd: str = ""):
+        """Open a 'distill' window in the task session for summarization.
+
+        cwd must be the task's working directory: `claude --resume` only finds
+        the conversation when run from the cwd the session was started in.
+        """
         name = self.session_name(slug)
-        # Create new window named distill
-        subprocess.run(
-            ["tmux", "new-window", "-t", name, "-n", "distill"],
-            capture_output=True,
-        )
-        # Resume the session there and send summarization prompt
+        cmd = ["tmux", "new-window", "-t", name, "-n", "distill"]
+        if cwd:
+            cmd += ["-c", os.path.expanduser(cwd)]
+        subprocess.run(cmd, capture_output=True)
+        # Resume a FORK of the session there — the original session may still
+        # be running; two claude processes must not share one transcript.
+        task_note = self.config.vault / "10-Tasks" / f"{slug}.md"
+        if not task_note.exists():
+            task_note = self.config.vault / "90-Archive" / f"{slug}.md"
         prompt = (
             "Please summarize this session: what was accomplished, "
             "key decisions made, research findings, and suggested next steps. "
-            "Format in markdown with clear sections."
+            f"Append the summary to the task note at {task_note} under a "
+            "'## Session Summary' heading (create it), then show it to me here too."
         )
         subprocess.run([
             "tmux", "send-keys", "-t", f"{name}:distill",
-            f"claude --resume {session_id}", "Enter",
+            f"claude --resume {session_id} --fork-session", "Enter",
         ])
-        # Give claude a moment to start, then send the prompt
-        subprocess.run([
-            "tmux", "send-keys", "-t", f"{name}:distill",
-            f"; {prompt}", "",
-        ])
+        # Deliver the prompt once the forked claude is actually ready
+        self.send_after_ready(slug, prompt, window="distill")
 
 
 # ---------------------------------------------------------------------------
@@ -914,13 +978,20 @@ class NotifyManager:
     def __init__(self, config: Config):
         self.config = config
 
-    def send(self, title: str, body: str, urgency: str = "normal"):
+    def send(self, title: str, body: str, urgency: str = "normal",
+             slug: str = ""):
+        # Deep-link hint: how to jump to the session this is about
+        if slug:
+            body = f"{body}\n→ loom go {slug}"
+        click_url = ""
+        if slug and self.config.get("LOOM_WEB_URL"):
+            click_url = f"{self.config.get('LOOM_WEB_URL').rstrip('/')}/#task-{slug}"
         for backend in self.config.notifications:
             try:
                 if backend == "notify-send":
                     self._notify_send(title, body, urgency)
                 elif backend == "ntfy":
-                    self._ntfy(title, body)
+                    self._ntfy(title, body, click_url)
                 elif backend == "bell":
                     self._bell()
             except Exception:
@@ -932,11 +1003,14 @@ class NotifyManager:
             capture_output=True, timeout=5,
         )
 
-    def _ntfy(self, title: str, body: str):
+    def _ntfy(self, title: str, body: str, click_url: str = ""):
         import urllib.request
         topic = self.config.get("LOOM_NTFY_TOPIC")
         server = self.config.get("LOOM_NTFY_SERVER")
-        data = json.dumps({"title": title, "message": body}).encode()
+        payload = {"title": title, "message": body}
+        if click_url:
+            payload["click"] = click_url
+        data = json.dumps(payload).encode()
         req = urllib.request.Request(
             f"{server}/{topic}",
             data=data,

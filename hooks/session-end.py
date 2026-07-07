@@ -41,6 +41,7 @@ try:
         vault.update_task(slug, status="idle")
         vault.append_log(slug, "Claude session ended")
         state.upsert(slug, status="idle")
+    vault.rebuild_dashboard()
 
 except Exception as e:
     print(f"loom session-end hook error: {e}", file=sys.stderr)

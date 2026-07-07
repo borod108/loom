@@ -41,7 +41,7 @@ try:
         urgency = "low"
 
     if title:
-        notify.send(title, body, urgency=urgency)
+        notify.send(title, body, urgency=urgency, slug=slug)
 
 except Exception as e:
     print(f"loom notification hook error: {e}", file=sys.stderr)

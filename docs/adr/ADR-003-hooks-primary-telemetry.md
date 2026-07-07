@@ -26,7 +26,7 @@ Hooks are the primary telemetry source. `capture-pane` is used only as a seconda
 
 **Negative / trade-offs:**
 - Hooks must be installed (once, by `install.sh`). Without hooks, status tracking degrades to "last seen" from vault frontmatter.
-- Sessions started outside loom have hooks fire too; the `session-start.py` hook auto-registers them as "unmanaged" tasks.
+- Sessions started outside loom have hooks fire too. By default they are ignored; set `LOOM_ADOPT_UNMANAGED=1` to auto-register them as "unmanaged" tasks (`<dir>-<sessionid8>` slug, `unmanaged: true` frontmatter) so all Claude work lands in the vault. (Amended 2026-07-06: originally documented as always-on, which the code never did.)
 
 ## Status History
 

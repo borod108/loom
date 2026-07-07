@@ -228,6 +228,8 @@ def cmd_new(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: T
         print(f"  CWD     : {cwd}")
         print(f"  Goal    : {dim(goal[:80] + ('…' if len(goal) > 80 else ''))}")
         print(f"\n  Goal will be sent once Claude starts. Attach: {bold(f'loom go {slug}')}")
+        print(dim("  Note: in a directory Claude hasn't seen before, a trust dialog appears —"))
+        print(dim("  the goal is delivered automatically right after you accept it."))
     else:
         print(f"{green('✓')} Created task {bold(slug)}")
         print(f"  Session : {session_name}")
@@ -281,8 +283,10 @@ def cmd_ls(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
         is_alive = slug in live_sessions
         archived = t.get("_archived", False)
 
-        # Compute display status: idle + no session = dead
-        if status in ("idle", "starting") and not is_alive and not archived:
+        # Any "live" status without a live tmux session means the session died.
+        # Unmanaged (adopted) sessions have no tmux session of their own.
+        unmanaged = t.get("unmanaged") in ("true", True)
+        if status not in ("done",) and not is_alive and not archived and not unmanaged:
             display_status = "dead"
         elif archived:
             display_status = "done"
@@ -350,7 +354,8 @@ def cmd_go(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: Tm
         # Restore extra windows from the last snapshot
         saved_windows = vault.get_windows(slug)
         if saved_windows:
-            extra = [w for w in saved_windows if w.get("idx", 0) > 0]
+            main_idx = min(w.get("idx", 0) for w in saved_windows)
+            extra = [w for w in saved_windows if w.get("idx", 0) != main_idx]
             if extra:
                 tmux.restore_windows(slug, saved_windows, session_id, model=model)
                 print(f"  Restored windows: {', '.join(w['name'] for w in extra)}")
@@ -405,7 +410,8 @@ def cmd_resume(args, cfg: Config, vault: VaultManager, state: StateManager, tmux
     # Restore extra windows from the last snapshot
     saved_windows = vault.get_windows(slug)
     if saved_windows:
-        extra = [w for w in saved_windows if w.get("idx", 0) > 0]
+        main_idx = min(w.get("idx", 0) for w in saved_windows)
+        extra = [w for w in saved_windows if w.get("idx", 0) != main_idx]
         if extra:
             tmux.restore_windows(slug, saved_windows, session_id, model=model)
             names = [w["name"] for w in extra]
@@ -431,6 +437,11 @@ def cmd_snapshot(args, cfg: Config, vault: VaultManager, state: StateManager, tm
     print(f"{green('✓')} Saved {len(windows)} window(s): {', '.join(names)}")
 
 
+def _has_summary(vault: VaultManager, slug: str) -> bool:
+    task = vault.get_task(slug)
+    return bool(task) and "## Session Summary" in task.get("body", "")
+
+
 def cmd_done(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
     """Mark a task as done: distill, archive, kill session."""
     slug = args.slug
@@ -441,16 +452,35 @@ def cmd_done(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: 
     session_id = task.get("session_id", "")
     distill = cfg.distill if not args.no_distill else "off"
 
-    # Distillation: open summary window before killing
-    if distill != "off" and tmux.session_exists(slug) and session_id:
+    # Distillation: open summary window before killing.
+    # Skipped when the task note already contains a session summary, so a
+    # second `loom done <slug>` proceeds straight to archiving.
+    if distill != "off" and not _has_summary(vault, slug) \
+            and tmux.session_exists(slug) and session_id:
         if distill == "auto" or _confirm("Open distillation window?"):
             print(f"Opening distillation window in {tmux.session_name(slug)}…")
-            tmux.open_distill_window(slug, session_id)
-            print("  Switch to the 'distill' window to review the summary.")
-            print(f"  When done, return here and run: {bold(f'loom done {slug} --no-distill')}")
-            return  # Let user review distillation first
+            tmux.open_distill_window(slug, session_id, cwd=task.get("cwd", ""))
+            if args.finish:
+                # Wait for the summary to land in the task note, then archive
+                import time as _time
+                print("  Waiting for the summary to be written to the task note…")
+                deadline = _time.time() + 300
+                while _time.time() < deadline:
+                    _time.sleep(5)
+                    if _has_summary(vault, slug):
+                        print(f"  {green('✓')} Summary saved to task note.")
+                        break
+                else:
+                    print(yellow("  Timed out waiting for the summary — not archiving."))
+                    print(f"  Review the 'distill' window, then re-run: {bold(f'loom done {slug}')}")
+                    return
+            else:
+                print("  Switch to the 'distill' window to review the summary.")
+                print(f"  Once the summary is saved, re-run {bold(f'loom done {slug}')} to archive")
+                print(f"  (or use {bold(f'loom done {slug} --finish')} to wait and archive automatically).")
+                return  # Let user review distillation first
 
-    if not _confirm(f"Mark '{slug}' as done and archive it?"):
+    if not args.yes and not _confirm(f"Mark '{slug}' as done and archive it?"):
         return
 
     # Kill session
@@ -584,6 +614,9 @@ def cmd_tunnel(args, cfg: Config, vault: VaultManager, state: StateManager, tmux
 
 def cmd_sync(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
     """Git-sync the vault (add, commit, pull --rebase, push)."""
+    if getattr(args, "enable_timer", False):
+        return _sync_enable_timer()
+
     v = vault.vault
     if not (v / ".git").exists():
         _die(f"Vault at {v} is not a git repo. Run: git init {v}")
@@ -597,14 +630,47 @@ def cmd_sync(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: 
 
     # Only commit if there's something to commit
     diff = subprocess.run(["git", "-C", str(v), "diff", "--cached", "--quiet"])
+    committed = False
     if diff.returncode != 0:
         git("commit", "-m", f"loom: auto-sync {_now_ts()}")
+        committed = True
+
+    # No remote configured → local commit is all we can (and should) do
+    remotes = subprocess.run(
+        ["git", "-C", str(v), "remote"], capture_output=True, text=True
+    ).stdout.split()
+    if not remotes:
+        what = "committed locally" if committed else "nothing to commit"
+        print(f"{green('✓')} Vault {what} — no remote configured, skipping pull/push.")
+        print(f"  To sync across machines: git -C {v} remote add origin <url>")
+        return
 
     if not git("pull", "--rebase"):
-        print(yellow("Warning: pull --rebase had conflicts. Resolve manually."))
+        print(yellow("Warning: pull --rebase failed. Resolve manually."))
 
     git("push")
     print(f"{green('✓')} Vault synced.")
+
+
+def _sync_enable_timer():
+    """Install and enable the systemd user timer for periodic vault sync."""
+    loom_dir    = find_loom_dir()
+    systemd_dir = Path.home() / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    for unit in ("loom-sync.service", "loom-sync.timer"):
+        src = loom_dir / "systemd" / unit
+        if not src.exists():
+            _die(f"Unit file not found: {src}")
+        shutil.copy(src, systemd_dir / unit)
+        print(f"  Installed {unit}")
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "loom-sync.timer"],
+                   capture_output=True)
+    r = subprocess.run(["systemctl", "--user", "is-active", "loom-sync.timer"],
+                       capture_output=True, text=True)
+    status = r.stdout.strip()
+    dot = green("✓") if status == "active" else yellow("⚠")
+    print(f"{dot} loom-sync.timer: {status}  (vault syncs every 30 min)")
 
 
 def _now_ts():
@@ -649,6 +715,136 @@ def cmd_send(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: 
         return
     tmux.send_keys(slug, text, enter=not args.no_enter)
     print(f"{green('✓')} Sent.")
+
+
+def cmd_search(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Case-insensitive search across all vault markdown files."""
+    if not vault.is_initialized():
+        _die("Vault not initialized. Run: loom init")
+    term = " ".join(args.term).lower()
+    hits = 0
+    for p in sorted(vault.vault.rglob("*.md")):
+        if ".git" in p.parts:
+            continue
+        rel = p.relative_to(vault.vault)
+        shown_header = False
+        if term in str(rel).lower():
+            print(bold(str(rel)) + dim("  (filename match)"))
+            shown_header = True
+            hits += 1
+        try:
+            lines = p.read_text().splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for n, line in enumerate(lines, 1):
+            if term in line.lower():
+                if not shown_header:
+                    print(bold(str(rel)))
+                    shown_header = True
+                snippet = line.strip()
+                if len(snippet) > 120:
+                    snippet = snippet[:119] + "…"
+                print(f"  {dim(f'{n}:')} {snippet}")
+                hits += 1
+        if shown_header:
+            print()
+    if not hits:
+        print(dim(f"No matches for '{' '.join(args.term)}'."))
+    else:
+        print(dim(f"{hits} match(es)."))
+
+
+def cmd_note(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Append a log entry to a task note from the CLI."""
+    slug = args.slug
+    text = " ".join(args.text)
+    if not vault.get_task(slug):
+        _die(f"Task '{slug}' not found.")
+    if not vault.append_log(slug, text):
+        _die(f"Could not write to task note for '{slug}' (archived tasks are read-only via note).")
+    state.upsert(slug)
+    print(f"{green('✓')} Logged to {bold(slug)}: {dim(text[:80])}")
+
+
+def cmd_doctor(args, cfg: Config, vault: VaultManager, state: StateManager, tmux: TmuxManager, notify: NotifyManager):
+    """Check the health of the loom installation."""
+    import json as _json
+
+    def ok(msg):   print(f"  {green('✓')} {msg}")
+    def bad(msg):  print(f"  {red('✗')} {msg}")
+    def meh(msg):  print(f"  {yellow('⚠')} {msg}")
+
+    print(bold("loom doctor"))
+
+    # Binaries
+    for cmd_name, required in [("tmux", True), ("git", True), ("claude", True),
+                               ("fzf", False), ("notify-send", False)]:
+        path = shutil.which(cmd_name)
+        if path:
+            ok(f"{cmd_name} ({path})")
+        elif required:
+            bad(f"{cmd_name} not found — required")
+        else:
+            extra = " (popup uses numbered fallback)" if cmd_name == "fzf" else ""
+            meh(f"{cmd_name} not found — optional{extra}")
+
+    # Config + vault
+    config_file = Path.home() / ".config" / "loom" / "config"
+    ok(f"config: {config_file}") if config_file.exists() else meh(f"no config file at {config_file} (using defaults)")
+    if vault.is_initialized():
+        ok(f"vault initialized: {vault.vault}")
+        if (vault.vault / ".git").exists():
+            remotes = subprocess.run(["git", "-C", str(vault.vault), "remote"],
+                                     capture_output=True, text=True).stdout.split()
+            ok(f"vault git remote: {', '.join(remotes)}") if remotes else meh("vault has no git remote — loom sync stays local")
+        else:
+            meh("vault is not a git repo — loom sync unavailable")
+    else:
+        bad(f"vault not initialized at {vault.vault} — run: loom init")
+
+    # Hooks in ~/.claude/settings.json
+    settings = Path.home() / ".claude" / "settings.json"
+    hook_events = ["SessionStart", "SessionEnd", "Stop", "UserPromptSubmit", "PreCompact", "Notification"]
+    try:
+        conf = _json.loads(settings.read_text())
+        installed = []
+        for ev in hook_events:
+            cmds = _json.dumps(conf.get("hooks", {}).get(ev, []))
+            if "loom" in cmds:
+                installed.append(ev)
+        missing = [e for e in hook_events if e not in installed]
+        ok(f"hooks installed: {', '.join(installed)}") if not missing else bad(f"hooks missing: {', '.join(missing)} — re-run install.sh")
+    except (OSError, ValueError):
+        bad(f"cannot read {settings} — re-run install.sh")
+
+    # Skills symlinks
+    for skill in ("recall", "loom-status"):
+        link = Path.home() / ".claude" / "skills" / skill
+        ok(f"skill linked: {skill}") if link.is_symlink() or link.exists() else meh(f"skill not linked: {skill} — re-run install.sh")
+
+    # Web security posture
+    if not cfg.web_token and cfg.get("LOOM_WEB_BIND") in ("0.0.0.0", "::"):
+        meh("web UI binds 0.0.0.0 with NO token — set LOOM_WEB_TOKEN")
+    else:
+        ok(f"web UI: bind {cfg.web_bind}, token {'set' if cfg.web_token else 'not needed (localhost)'}")
+
+    # Consistency: tasks vs tmux sessions
+    live = {s["slug"] for s in tmux.list_sessions()}
+    tasks = {t["slug"]: t for t in vault.list_tasks()}
+    orphans = live - set(tasks)
+    deads   = [s for s, t in tasks.items()
+               if s not in live and t.get("status") in ("working", "waiting", "starting")
+               and t.get("unmanaged") not in ("true", True)]
+    ok("no orphan loom-* tmux sessions") if not orphans else meh(f"tmux sessions without task notes: {', '.join(sorted(orphans))}")
+    ok("no dead tasks stuck in live status") if not deads else meh(f"tasks with dead sessions: {', '.join(sorted(deads))} (loom resume or loom done)")
+
+    # Sync timer
+    r = subprocess.run(["systemctl", "--user", "is-active", "loom-sync.timer"],
+                       capture_output=True, text=True)
+    if r.stdout.strip() == "active":
+        ok("auto-sync timer active")
+    else:
+        meh("auto-sync timer not enabled — loom sync --enable-timer")
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_done = sub.add_parser("done", help="Mark a task as done and archive it")
     p_done.add_argument("slug", help="Task name")
     p_done.add_argument("--no-distill", action="store_true", help="Skip distillation step")
+    p_done.add_argument("--finish", action="store_true",
+                        help="Wait for the distill summary, then archive automatically")
+    p_done.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
 
     # web
     p_web = sub.add_parser("web", help="Start the web UI")
@@ -708,10 +907,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--bind", help="Bind address (default from config)")
 
     # sync
-    sub.add_parser("sync", help="Git-sync the vault")
+    p_sync = sub.add_parser("sync", help="Git-sync the vault")
+    p_sync.add_argument("--enable-timer", action="store_true",
+                        help="Install + enable a systemd user timer (sync every 30 min)")
 
     # rebuild
     sub.add_parser("rebuild", help="Rebuild tasks.json from vault")
+
+    # search
+    p_search = sub.add_parser("search", help="Search the vault (case-insensitive)")
+    p_search.add_argument("term", nargs="+", help="Search term")
+
+    # note
+    p_note = sub.add_parser("note", help="Append a log entry to a task note")
+    p_note.add_argument("slug", help="Task name")
+    p_note.add_argument("text", nargs="+", help="Log text")
+
+    # doctor
+    sub.add_parser("doctor", help="Check the health of the loom installation")
 
     # adr
     p_adr = sub.add_parser("adr", help="Create a new ADR")
@@ -767,6 +980,9 @@ _COMMANDS = {
     "link":     cmd_link,
     "snapshot": cmd_snapshot,
     "tunnel":   cmd_tunnel,
+    "search":   cmd_search,
+    "note":     cmd_note,
+    "doctor":   cmd_doctor,
 }
 
 
