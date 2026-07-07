@@ -98,7 +98,8 @@ def _build_task_summary(slug: str, fields: dict, include_preview: bool = False) 
     alive    = _tmux.session_exists(slug)
     status   = fields.get("status", "unknown")
     archived = fields.get("_archived", False)
-    if status in ("idle", "starting") and not alive and not archived:
+    unmanaged = fields.get("unmanaged") in ("true", True)
+    if status not in ("done",) and not alive and not archived and not unmanaged:
         display_status = "dead"
     elif archived:
         display_status = "done"
@@ -197,6 +198,66 @@ def api_task_kill(handler: "LoomHandler", slug: str):
         _error(handler, "Failed to kill session", 500)
 
 
+def api_task_archive(handler: "LoomHandler", slug: str):
+    task = _vault.get_task(slug)
+    if not task:
+        _error(handler, f"Task not found: {slug}", 404)
+        return
+    if task.get("_archived") or "90-Archive" in task.get("path", ""):
+        _error(handler, f"Task already archived: {slug}", 409)
+        return
+    if _tmux.session_exists(slug):
+        _tmux.kill_session(slug)
+    _vault.update_task(slug, status="done")
+    _vault.archive_task(slug)
+    _state.upsert(slug, status="done")
+    _json_response(handler, {"ok": True})
+
+
+_VAULT_BROWSE_DIRS = {
+    "decisions": "30-Decisions",
+    "research":  "40-Research",
+    "tasks":     "10-Tasks",
+    "archive":   "90-Archive",
+}
+
+
+def api_vault_list(handler: "LoomHandler"):
+    result = {}
+    for key, d in _VAULT_BROWSE_DIRS.items():
+        entries = []
+        dir_path = _vault.vault / d
+        if dir_path.exists():
+            for p in sorted(dir_path.glob("*.md")):
+                entries.append({
+                    "name": p.stem,
+                    "path": f"{d}/{p.name}",
+                })
+        result[key] = entries
+    _json_response(handler, result)
+
+
+def api_vault_note(handler: "LoomHandler"):
+    qs = parse_qs(urlparse(handler.path).query)
+    rel = qs.get("path", [""])[0]
+    if not rel:
+        _error(handler, "Missing 'path' parameter")
+        return
+    vault_root = _vault.vault.resolve()
+    note = (vault_root / rel).resolve()
+    # Only markdown files strictly inside the vault
+    if not str(note).startswith(str(vault_root) + os.sep) or note.suffix != ".md":
+        _error(handler, "Not found", 404)
+        return
+    if not note.is_file():
+        _error(handler, "Not found", 404)
+        return
+    _json_response(handler, {
+        "path": rel,
+        "content": note.read_text(errors="replace"),
+    })
+
+
 def api_health(handler: "LoomHandler"):
     _json_response(handler, {
         "ok": True,
@@ -240,8 +301,15 @@ class LoomHandler(BaseHTTPRequestHandler):
         # API routes
         if path == "/api/health" and method == "GET":
             api_health(self)
+        elif path == "/api/vault/list" and method == "GET":
+            api_vault_list(self)
+        elif path == "/api/vault/note" and method == "GET":
+            api_vault_note(self)
         elif path == "/api/tasks" and method == "GET":
             api_tasks_list(self)
+        elif path.endswith("/archive") and path.startswith("/api/tasks/") and method == "POST":
+            slug = path.split("/")[3] if len(path.split("/")) > 3 else ""
+            api_task_archive(self, slug)
         elif path.startswith("/api/tasks/") and method == "GET":
             parts = path.split("/")
             slug = parts[3] if len(parts) > 3 else ""
@@ -265,7 +333,11 @@ class LoomHandler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str):
         if path == "/" or path == "":
             path = "/index.html"
-        file_path = STATIC_DIR / path.lstrip("/")
+        file_path = (STATIC_DIR / path.lstrip("/")).resolve()
+        # Refuse anything that escapes the static dir (path traversal)
+        if not str(file_path).startswith(str(STATIC_DIR.resolve()) + os.sep):
+            _error(self, "Not found", 404)
+            return
         if not file_path.exists() or not file_path.is_file():
             _error(self, "Not found", 404)
             return

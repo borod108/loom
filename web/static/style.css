@@ -430,3 +430,71 @@ input[type="checkbox"] { accent-color: var(--blue); }
   .task-meta { gap: 0.5rem; }
   .pane-preview { font-size: 0.72rem; }
 }
+
+/* ── Vault browser panel ── */
+.vault-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+}
+.vault-section { min-width: 200px; flex: 1; }
+.vault-section h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+.vault-count {
+  background: var(--surface2);
+  border-radius: 10px;
+  padding: 0 0.5em;
+  font-size: 0.75rem;
+  color: var(--dim);
+}
+.vault-section ul { list-style: none; }
+.vault-section li { padding: 0.15rem 0; }
+.vault-section a { color: var(--blue); text-decoration: none; font-family: var(--mono); font-size: 0.85rem; }
+.vault-section a:hover { text-decoration: underline; }
+.vault-loading { color: var(--muted); }
+
+/* ── Note viewer modal ── */
+.note-modal { max-width: 760px; width: 92vw; max-height: 85vh; display: flex; flex-direction: column; }
+.note-body {
+  overflow-y: auto;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+.note-body h2, .note-body h3, .note-body h4, .note-body h5 { margin: 1em 0 0.4em; }
+.note-body p { margin: 0.4em 0; }
+.note-body ul { margin: 0.4em 0 0.4em 1.4em; }
+.note-body pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  margin: 0.5em 0;
+}
+.note-body code { font-family: var(--mono); background: var(--surface2); padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.85em; }
+.note-body pre code { background: none; padding: 0; }
+.note-body blockquote { border-left: 3px solid var(--border); padding-left: 0.75rem; color: var(--muted); margin: 0.4em 0; }
+.note-body hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.note-body .wikilink { color: var(--cyan); }
+.note-body .frontmatter {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--dim);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.note-body a { color: var(--blue); }

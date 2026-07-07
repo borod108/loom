@@ -59,6 +59,76 @@ async function killSession(slug) {
   return r.json();
 }
 
+async function archiveTask(slug) {
+  const r = await fetch(apiUrl(`/api/tasks/${slug}/archive`), { method: 'POST' });
+  return r.json();
+}
+
+async function fetchVaultList() {
+  const r = await fetch(apiUrl('/api/vault/list'));
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+async function fetchVaultNote(path) {
+  const r = await fetch(apiUrl('/api/vault/note', { path }));
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ---------------------------------------------------------------------------
+// Minimal markdown renderer (headings, lists, code, bold/italic, links)
+// ---------------------------------------------------------------------------
+
+function mdInline(s) {
+  return esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[\[([^\]]+)\]\]/g, '<span class="wikilink">$1</span>')
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+
+function mdToHtml(md) {
+  const lines = md.split('\n');
+  const out = [];
+  let inCode = false, inList = false, inFm = false;
+  lines.forEach((line, i) => {
+    if (i === 0 && line.trim() === '---') { inFm = true; out.push('<div class="frontmatter">'); return; }
+    if (inFm) {
+      if (line.trim() === '---') { inFm = false; out.push('</div>'); }
+      else out.push(`<div>${esc(line)}</div>`);
+      return;
+    }
+    if (line.startsWith('```')) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(inCode ? '</code></pre>' : '<pre><code>');
+      inCode = !inCode;
+      return;
+    }
+    if (inCode) { out.push(esc(line)); return; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(`<h${h[1].length + 1}>${mdInline(h[2])}</h${h[1].length + 1}>`);
+      return;
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${mdInline(line.replace(/^\s*[-*]\s+/, ''))}</li>`);
+      return;
+    }
+    if (inList) { out.push('</ul>'); inList = false; }
+    if (/^\s*---+\s*$/.test(line)) { out.push('<hr>'); return; }
+    if (/^\s*>\s?/.test(line)) { out.push(`<blockquote>${mdInline(line.replace(/^\s*>\s?/, ''))}</blockquote>`); return; }
+    if (line.trim() === '') { out.push(''); return; }
+    out.push(`<p>${mdInline(line)}</p>`);
+  });
+  if (inList) out.push('</ul>');
+  if (inCode) out.push('</code></pre>');
+  return out.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -84,13 +154,21 @@ function renderTask(task) {
   card.dataset.slug = task.slug;
 
   // Actions always visible in header
+  const noteBtn = `<button class="btn btn-sm btn-ghost" data-action="note" data-slug="${esc(task.slug)}" title="View task note">📄</button>`;
   let headerActions = '';
   if (task.alive) {
     headerActions = `
+      ${noteBtn}
       <button class="btn btn-sm btn-secondary" data-action="send" data-slug="${esc(task.slug)}" title="Send input">✏</button>
+      <button class="btn btn-sm btn-ghost"     data-action="archive" data-slug="${esc(task.slug)}" title="Archive task">📦</button>
       <button class="btn btn-sm btn-danger"    data-action="kill" data-slug="${esc(task.slug)}" title="Kill session">✕</button>`;
   } else if (!archived) {
-    headerActions = `<button class="btn btn-sm btn-ghost" data-action="resume" data-slug="${esc(task.slug)}" title="Resume Claude">▶ Resume</button>`;
+    headerActions = `
+      ${noteBtn}
+      <button class="btn btn-sm btn-ghost" data-action="resume" data-slug="${esc(task.slug)}" title="Resume Claude">▶ Resume</button>
+      <button class="btn btn-sm btn-ghost" data-action="archive" data-slug="${esc(task.slug)}" title="Archive task">📦</button>`;
+  } else {
+    headerActions = noteBtn;
   }
 
   const modelTag = task.model
@@ -272,7 +350,76 @@ function handleAction(action, slug) {
       .catch(() => alert('Resume failed — session may not have a running shell.'));
   } else if (action === 'attach') {
     alert(`Run in your terminal:\n  loom go ${slug}`);
+  } else if (action === 'archive') {
+    if (confirm(`Archive '${slug}'? This kills its session and moves the note to 90-Archive.`)) {
+      archiveTask(slug).then(() => refresh());
+    }
+  } else if (action === 'note') {
+    const task = tasks.find(t => t.slug === slug);
+    const dir = task?.archived ? '90-Archive' : '10-Tasks';
+    openNote(`${dir}/${slug}.md`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Vault browser
+// ---------------------------------------------------------------------------
+
+let vaultOpen = false;
+
+async function toggleVault() {
+  vaultOpen = !vaultOpen;
+  const panel = document.getElementById('vault-panel');
+  const btn = document.getElementById('btn-vault');
+  btn.classList.toggle('active', vaultOpen);
+  panel.hidden = !vaultOpen;
+  if (!vaultOpen) return;
+  panel.innerHTML = '<p class="vault-loading">Loading vault…</p>';
+  try {
+    const v = await fetchVaultList();
+    const section = (title, key) => {
+      const items = v[key] || [];
+      if (!items.length) return '';
+      return `
+        <div class="vault-section">
+          <h3>${esc(title)} <span class="vault-count">${items.length}</span></h3>
+          <ul>${items.map(e =>
+            `<li><a href="#" data-note="${esc(e.path)}">${esc(e.name)}</a></li>`).join('')}
+          </ul>
+        </div>`;
+    };
+    panel.innerHTML =
+      section('Decisions', 'decisions') +
+      section('Research', 'research') +
+      section('Archived tasks', 'archive') ||
+      '<p class="vault-loading">Vault is empty.</p>';
+    panel.querySelectorAll('[data-note]').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        openNote(a.dataset.note);
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = `<p class="vault-loading">Failed to load vault: ${esc(e.message)}</p>`;
+  }
+}
+
+async function openNote(path) {
+  const overlay = document.getElementById('note-overlay');
+  document.getElementById('note-title').textContent = path;
+  const content = document.getElementById('note-content');
+  content.innerHTML = '<p class="vault-loading">Loading…</p>';
+  overlay.hidden = false;
+  try {
+    const note = await fetchVaultNote(path);
+    content.innerHTML = mdToHtml(note.content);
+  } catch (e) {
+    content.innerHTML = `<p class="vault-loading">Failed to load: ${esc(e.message)}</p>`;
+  }
+}
+
+function closeNote() {
+  document.getElementById('note-overlay').hidden = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +507,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-refresh').addEventListener('click', () => {
     refresh();
     startAutoRefresh();
+  });
+
+  // Vault browser + note viewer
+  document.getElementById('btn-vault').addEventListener('click', toggleVault);
+  document.getElementById('note-close').addEventListener('click', closeNote);
+  document.getElementById('note-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('note-overlay')) closeNote();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeNote();
   });
 
   // Modal events

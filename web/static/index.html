@@ -11,6 +11,7 @@
     <div class="header-inner">
       <span class="logo">🧵 loom</span>
       <div class="header-right">
+        <button class="btn-toggle" id="btn-vault">Vault</button>
         <button class="btn-toggle" id="btn-show-all">Show archived</button>
         <span class="refresh-status" id="refresh-status">—</span>
         <button class="btn-icon" id="btn-refresh" title="Refresh now">↻</button>
@@ -19,12 +20,24 @@
   </header>
 
   <main>
+    <div id="vault-panel" class="vault-panel" hidden></div>
     <div id="task-list"></div>
     <div id="empty-state" class="empty-state" hidden>
       <p>No active tasks.</p>
       <code>loom new my-task</code>
     </div>
   </main>
+
+  <!-- Vault note viewer modal -->
+  <div id="note-overlay" class="modal-overlay" hidden>
+    <div class="modal note-modal">
+      <div class="modal-header">
+        <span id="note-title">note</span>
+        <button class="btn-icon" id="note-close">✕</button>
+      </div>
+      <div class="modal-body note-body" id="note-content"></div>
+    </div>
+  </div>
 
   <!-- Send-input modal -->
   <div id="modal-overlay" class="modal-overlay" hidden>
