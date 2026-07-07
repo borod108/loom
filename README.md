@@ -48,11 +48,21 @@ loom go auth-refactor
 # Start the web UI
 loom web                   # http://localhost:7799
 
-# Mark a task done (archives it to the vault)
-loom done auth-refactor
+# Mark a task done: distill summary → archive (use --finish to wait+archive in one go)
+loom done auth-refactor --finish
 
-# Sync vault to git remote
+# Search the vault from the CLI
+loom search jwt
+
+# Append a note to a task log
+loom note auth-refactor "picked RS256 over HS256"
+
+# Check the health of the install
+loom doctor
+
+# Sync vault to git remote (or set up a 30-min auto-sync timer)
 loom sync
+loom sync --enable-timer
 ```
 
 ## Vault structure
@@ -86,10 +96,13 @@ Edit `~/.config/loom/config`:
 LOOM_VAULT="~/vault"            # vault directory
 LOOM_SESSION_PREFIX="loom"      # tmux session prefix (default: loom)
 LOOM_WEB_PORT="7799"
-LOOM_WEB_BIND="0.0.0.0"        # set to 127.0.0.1 for localhost-only
-LOOM_WEB_TOKEN=""               # Bearer token for web auth (empty = no auth)
+LOOM_WEB_BIND=""                # empty = auto: 0.0.0.0 when token set, else 127.0.0.1
+LOOM_WEB_TOKEN="<generated>"    # install.sh generates one; clear to force localhost-only
+LOOM_WEB_URL=""                 # public UI URL — used for notification click links
 LOOM_DISTILL="auto"             # auto | manual | off
 LOOM_NOTIFICATIONS="notify-send" # notify-send, ntfy, bell (comma-separated)
+LOOM_ADOPT_UNMANAGED="0"        # 1 = also track Claude sessions started outside loom
+LOOM_NOTIFY_ON_STOP="0"         # 1 = desktop notification when a task finishes a turn
 ```
 
 ## Web UI
@@ -100,9 +113,11 @@ loom web
 ```
 
 - Dark theme, mobile-responsive
-- Shows task status, age, last N pane lines
-- Actions: Send input, Kill session
-- Optional token auth: `http://host:7799/?token=<your-token>`
+- Shows task status, age, live pane preview
+- Actions: Send input, Kill session, Archive task, view task note
+- Vault browser: Decisions / Research / archived tasks, rendered as markdown
+- Token auth (generated at install): `http://host:7799/?token=<your-token>`
+- Security default: binds `127.0.0.1` unless a token is configured
 
 ## Architecture decisions
 
@@ -123,6 +138,11 @@ python3 -m pytest tests/test_vault.py tests/test_state.py -v
 
 # Integration tests (requires tmux)
 bash tests/test_status.sh --verbose
+
+# Full developer-flow test: 3 parallel tasks, vault growth, knowledge reuse.
+# Mock mode is free and fully isolated; --real drives actual claude (haiku).
+bash tests/test_full_flow.sh
+bash tests/test_full_flow.sh --real
 ```
 
 ## Adding a new machine

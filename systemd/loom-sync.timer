@@ -1,0 +1,13 @@
+# loom vault auto-sync timer — every 30 minutes, plus 2 minutes after boot
+# Install: loom sync --enable-timer
+
+[Unit]
+Description=loom vault git sync timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

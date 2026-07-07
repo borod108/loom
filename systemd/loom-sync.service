@@ -1,0 +1,11 @@
+# loom vault auto-sync — systemd user service (fired by loom-sync.timer)
+# Install: loom sync --enable-timer
+
+[Unit]
+Description=loom vault git sync
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/loom/bin/loom sync
+EnvironmentFile=-%h/.config/loom/config

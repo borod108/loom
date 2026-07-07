@@ -59,3 +59,19 @@ LOOM_NOTIFICATIONS="notify-send"
 # ── Skills ─────────────────────────────────────────────────────────────────
 # Skills are symlinked from <loom>/skills/ to ~/.claude/skills/ by install.sh.
 # No config needed; just re-run install.sh after adding a skill to the repo.
+
+# ── Added options (2026-07-06) ──────────────────────────────────────────────
+# Bind address for the web UI. Empty = automatic:
+#   0.0.0.0 when LOOM_WEB_TOKEN is set, 127.0.0.1 otherwise.
+# LOOM_WEB_BIND=""
+
+# Public URL of the web UI (behind a gateway/tunnel). Used as the click
+# target for ntfy notifications.
+# LOOM_WEB_URL="https://loom.example.com/m1"
+
+# Register Claude sessions started outside loom as "unmanaged" tasks so
+# every session lands in the vault. Opt-in.
+# LOOM_ADOPT_UNMANAGED="1"
+
+# Desktop-notify each time a task's Claude finishes a turn.
+# LOOM_NOTIFY_ON_STOP="1"
