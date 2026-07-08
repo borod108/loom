@@ -42,9 +42,14 @@ fi
 hr "Integration tests (TmuxManager — requires tmux)"
 if command -v tmux &>/dev/null; then
   if bash tests/test_status.sh; then
-    pass "All tmux integration tests"
+    pass "All tmux integration tests (status)"
   else
-    fail "tmux integration tests"
+    fail "tmux integration tests (status)"
+  fi
+  if bash tests/test_tmux_skill.sh; then
+    pass "All tmux skill tests (session isolation + targeting)"
+  else
+    fail "tmux skill tests"
   fi
 else
   echo "  SKIP: tmux not found"
